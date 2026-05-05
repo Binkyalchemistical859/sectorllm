@@ -114,7 +114,6 @@ org 0x7c00
     shrd eax, edx, 16
 %endmacro
     
-    
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Boot sector                                                                ;;
@@ -255,9 +254,9 @@ rmsnorm:
 .norm:
     es lodsd              ; eax = x[i], SI += 4
     imul ebp              ; eax = x[i] * (1/sqrt(ss))
-    call q16_shift
+    Q16_SHIFT_INLINE
     imul dword [bx]       ; eax *= w[i]
-    call q16_shift        ; eax = x[i] * w[i] / sqrt(ss)
+    Q16_SHIFT_INLINE      ; eax = x[i] * w[i] / sqrt(ss)
     add bx, 4             ; advance weight pointer
     stosd                 ; write to output, DI += 4
     loop .norm
