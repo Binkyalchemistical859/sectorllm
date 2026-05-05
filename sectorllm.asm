@@ -514,11 +514,10 @@ matmul:
     ret
 
 ; Store a FP16.16 KV vector into the flat KV cache at the current position.
-; in  DI:  source vector (ES:DI, FP16.16[KV_DIM])
+; in  SI:  source vector (ES:SI, FP16.16[KV_DIM])
 ; in  EDX: cache base address (K_CACHE_BASE or V_CACHE_BASE)
 cache_kv:
     pushad
-    mov si, di
     mov di, [es:CUR_POS]        ; DI = t
     xor bp, bp                  ; BP = 0 (head 0, so get_kv_ptr gets the start of token slice)
     call get_kv_ptr             ; ebx = address of cache slot
@@ -571,11 +570,11 @@ forward:
     call apply_rope             ; rotate K
 
     ; cache K and V for this position
-    mov di, R_QKV + DIM*4
+    mov si, R_QKV + DIM*4
     mov edx, K_CACHE_BASE
     call cache_kv               ; KC[layer][pos] = K (FP16.16)
 
-    mov di, R_QKV + DIM*4 + KV_DIM*4
+    mov si, R_QKV + DIM*4 + KV_DIM*4
     mov edx, V_CACHE_BASE
     call cache_kv               ; VC[layer][pos] = V (FP16.16)
 
@@ -621,7 +620,7 @@ forward:
     call do_matmul              ; R_XB = w_w2 * R_HB
 
     ; Residual connection
-    call vadd_rx                ; R_X + R_XB
+    call vadd_rx                ; R_X += R_XB
 
     ; Go to next layer
     inc word [es:CUR_LAYER]
@@ -635,7 +634,7 @@ forward:
     xor di, di                  ; R_X
     call rmsnorm                ; R_X = rmsnorm(R_X, w_rms_final)
 
-    ; Compute logits and pick best token (use greedy argmax)
+	; Compute logits and pick best token (use greedy argmax)
     mov dword [es:R_MAX], 0x80000000 ; INT_MIN
     xor di, di                       ; DI = token index
     mov word [es:R_BEST], di         ; best = 0
@@ -713,13 +712,14 @@ attention:
     mov cx, HEAD_DIM
     xor ebp, ebp                ; acc
 
+	xchg ebx, esi
+
 ; dot(Q_h, K_t)
 .dot_loop:
-    mov eax, [gs:ebx]           ; eax = K
-    add ebx, 4
-    imul dword [es:si]          ; edx:eax = K[t][i] * Q[h][i]
+    a32 gs lodsd                ; eax = K
+    imul dword [es:bx]          ; edx:eax = K[t][i] * Q[h][i]
     call q16_shift                          
-    add si, 4
+    add bx, 4
     add ebp, eax                ; accumulate (low 32 bits enough for HEAD_DIM=8)
     loop .dot_loop
 .dot_done:
@@ -823,13 +823,13 @@ attention:
     mov ebp, eax
 
     mov cx, HEAD_DIM
+	xchg ebx, esi
 .v_mac:
-    mov eax, [gs:ebx]        ; eax = V[t][i] (int8)
-    add ebx, 4
-    imul ebp                 ; eax = V[t][i] * a_scaled
+    a32 gs lodsd				; eax = V[t][i], ESI += 4
+    imul ebp					; edx:eax = V[t][i] * a_t 
     call q16_shift
-    add [es:si], eax
-    add si, 4
+    add [es:bx], eax			; R_XB[h][i] += V[t][i] * a_t
+    add bx, 4
     loop .v_mac
 
     pop bp
