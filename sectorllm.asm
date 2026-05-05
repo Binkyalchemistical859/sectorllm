@@ -180,10 +180,10 @@ inv_sqrt:
     push ebx
     push esi
 
-    mov ebx, eax                ; save x
+    xchg eax, ebx                ; save x
 
     ; Initial guess from bit position: y ~= 2^((48-bsr(x))/2)
-    bsr ecx, eax
+    bsr ecx, ebx
     neg cl
     add cl, 48
     shr cl, 1
@@ -209,7 +209,7 @@ inv_sqrt:
     pop ebx
     ret
 
-; Helper entry point: sets up DS and BX before calling rmsnorm
+; rmsnorm helper: sets up DS and BX before doing rmsnorm logic
 ; in AX:      weight segment base
 ; in ES:DI:   output buffer
 do_rmsnorm:
@@ -246,7 +246,7 @@ rmsnorm:
     inc eax ; epsilon
 
     call inv_sqrt               ; eax = 1/sqrt(ss) in FP16.16
-    mov ebp, eax                ; ebp = normalization scale
+    xchg ebp, eax               ; ebp = normalization scale
 
     pop si                      ; restore SI to R_X
     mov cx, DIM
@@ -317,7 +317,7 @@ matmul:
     popad
     ret
 
-; It is slower to always call this function but it saves a byte each time!
+; It is slower to always call this function but it saves two bytes each time!
 q16_shift:
     shrd eax, edx, 16
     ret
@@ -348,8 +348,7 @@ vadd:
 ; in CX:     number of heads to process
 apply_rope:
     push ebp
-    mov bx, [es:CUR_POS]
-    shl bx, 5                   ; bx = CUR_POS * 32 (8 bytes per pair * 4 pairs per head)
+    imul bx, [es:CUR_POS], 32   ; bx = CUR_POS * 32 (8 bytes per pair * 4 pairs per head)
     push W_FREQ_CIS
     pop ds                      ; DS = freq table
 
@@ -494,32 +493,31 @@ get_kv_offset:
 ; in DI:  t (token position)
 ; out SI: &R_ATT[h][t]
 get_att_ptr:
-    mov si, bp
-    shl si, 11      ; SI = h * 2048 (SEQ * 4 bytes)
-    add si, R_ATT   ; SI = base of this head's attention scores
-    mov cx, di
-    shl cx, 2       ; cx = t * 4 (4 bytes per score)
-    add si, cx      ; SI = &R_ATT[h][t]
+    imul si, bp, 2048	   ; h * 2048 (SEG * 4 bytes)
+    add si, R_ATT          ; SI = base of this head's attention scores
+    imul cx, di, 4         ; cx = t * 4 (4 bytes per score)
+    add si, cx             ; SI = &R_ATT[h][t]
     ret
 
 
-; AX=base_Q, CX=layer_stride(paragraphs), EDX=(rows<<16)|cols
-; SI = scale segment base
-; DI=input vector (ES:DI), BX=output vector (ES:BX)
+; matmul helper: 
+; in AX:   base_Q
+; in CX:   layer stride
+; in EDX:  (rows<<16) | cols
+; in SI: scale segment
+; ES:DI: input vector
+; ES:BX: output vector
 do_matmul:
     push bx                   ; save out_ptr
     mov bx, [es:CUR_LAYER]
     imul bx, cx               ; bx = layer * stride (paragraphs)
     add bx, ax                ; bx = weight base + layer*stride
-    mov ds, bx                ; DS = this layer's int8 weight segment
-    push bx
 
     ; Load single global scale from the scale segment for this layer
     mov ds, si
     mov ebp, [0]              ; load scale for current layer
 
-    ; Restore DS to the weight segment
-    pop ds
+    mov ds, bx                ; DS = this layer's int8 weight segment
 
     xor si, si                ; SI=0: matmul reads DS:SI starting from weight row 0
     pop bx                    ; restore out_ptr
@@ -563,13 +561,12 @@ quant_cache:
     jnz .scale_ok
     inc ax                      ; clamp to 1
 .scale_ok:
-    mov ebp, eax                ; ebp = scale
+    xchg ebp, eax               ; ebp = scale
 
     ; store scale
     pop dx
     call set_seg_128            ; DS = scale cache segment for this layer
-    mov bx, [es:CUR_POS]        
-    shl bx, 2
+    imul bx, [es:CUR_POS], 4
     mov [bx], ebp               ; scale_cache[bx] = scale
 
     ; quantize and cache
@@ -718,7 +715,7 @@ forward:
 .lm_loop:
     mov ax, W_TOKEN_EMB
     mov cx, di
-    shl cx, 4                   ; token i * 16 paragraphs
+    imul cx, di, 16             ; token i * 16 paragraphs
     add ax, cx
     mov ds, ax                  ; DS = embedding[i] segment
 
@@ -790,7 +787,7 @@ attention:
     loop .dot_loop
 
 .dot_done:
-    mov eax, ebp
+    xchg eax, ebp
     pop bp                      ; restore h
     pop di                      ; restore t
 
@@ -847,9 +844,8 @@ attention:
     push cx
     xor esi, esi                ; sum = 0
 .s_exp:
-    mov edx, [es:di]
     push eax                    ; save max
-    sub eax, edx                ; diff = max - x
+    sub eax, [es:di]            ; diff = max - x
     shr eax, 10                 ; scale down for LUT index, diff / 64
     cmp ax, 511                 ; clamp to LUT range
     jle .s_ok
@@ -964,8 +960,8 @@ silu_gate:
     jle .ok
     mov ax, 1023                ; ax = min(ax, 1023)
 .ok:
-    mov bx, ax
-    shl bx, 2                   ; bx = index * 4
+    shl ax, 2
+    xchg ax, bx                 ; bx = index * 4
     mov edx, [fs:bx+0x800]      ; edx = silu_lut[ax]
 
     ; Multiply by up[i] and store in gate[i]
