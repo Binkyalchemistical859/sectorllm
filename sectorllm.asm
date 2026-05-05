@@ -32,10 +32,9 @@ org 0x7c00
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Model layout                                                               ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-%define MODEL_BASE 0x2000
+%define MODEL_BASE 0x2002       ; Skip the header
 
 ; Sizes in paragraphs
-
 ; Precomputed lookup tables (exp and silu)
 %define P_LUT       0x180       ; 6144 bytes
 %define P_TOKEN_EMB (VOCAB * DIM * 4 / 16)
@@ -90,24 +89,23 @@ org 0x7c00
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 %define R_X       0x0000    ; FP16.16[DIM]
 %define R_XB      0x0100    ; FP16.16[DIM]
-%define R_XB2     0x0200    ; FP16.16[VOCAV] (overlaps R_QKV and R_HB)
+%define R_XB2     0x0200    ; FP16.16[VOCAB] (overlaps R_QKV and R_HB)
 %define R_QKV     0x0300    ; 384 bytes (Q=64, K=16, V=16)
 %define R_HB      0x0480    ; FP16.16[HIDDEN]
 
 ; Global State Variables
-%define R_MAX     0x09E0    ; dword
-%define R_BEST    0x09E4    ; word
-%define CUR_LAYER 0x09E6    ; word
-%define CUR_POS   0x09E8    ; word
+%define R_MAX      0x09E0    ; dword
+%define R_BEST     0x09E4    ; word
+%define CUR_LAYER  0x09E6    ; word
+%define CUR_POS    0x09E8    ; word
 
 %define R_ATT     0x0A00    ; FP16.16[TOKEN_COUNT*HEADS]
     
 
 ; Cache Segments
-%define KC_SEG 0x0840
-%define KS_SEG 0x1C40
-%define VC_SEG 0x8600
-%define VS_SEG 0x9A00
+%define K_CACHE_BASE 0x00100000 ; 1MB mark
+%define V_CACHE_BASE 0x00200000 ; 2MB mark
+
 
 ; Best for hot code
 %macro Q16_SHIFT_INLINE 0
@@ -136,6 +134,15 @@ entry:
     int 0x13
     ; assume no error ;)
 
+    lgdt [gdt_desc]
+    mov eax, cr0
+    inc ax
+    mov cr0, eax                ; enter pmode
+    push 0x8                    ; data segment
+    pop gs
+    dec ax
+    mov cr0, eax                ; exit pmode
+.unreal:
     ; Set up scratch segment (ES)
     push 0x8000
     pop es
@@ -154,7 +161,7 @@ entry:
 start_inference:
     mov [es:CUR_POS], cx        ; cur_pos=0
     mov bx, 1                   ; BOS
-    push 0x2000                 ; LUT segment
+    push MODEL_BASE             ; LUT segment
     pop fs
 
 .gen_loop:
@@ -177,8 +184,6 @@ start_inference:
 ; Clobbers: ecx
 inv_sqrt:
     push ebx
-    push esi
-
     xchg eax, ebx                ; save x
 
     ; Initial guess from bit position: y ~= 2^((48-bsr(x))/2)
@@ -192,31 +197,31 @@ inv_sqrt:
 
 ; Newton-Raphson: y = y * (3 - x*y^2) / 2
 .loop:
-    mov esi, eax                ; esi = y
+	push eax					; save y
     mul eax                     ; edx:eax = y^2
     call q16_shift              ; convert to FP16.16
     mul ebx                     ; edx:eax = x*y^2
     call q16_shift              ; convert to FP16.16
     neg eax                     ; eax = -x*y^2
     add eax, 3*65536            ; eax = 3 - x*y^2 (FP16.16)
+	pop esi						; esi = y
     mul esi
     call q16_shift              ; eax = y*(3 - x*y^2) (FP16.16)
     shr eax, 1                  ; / 2
     loop .loop
 .done:
-    pop esi
     pop ebx
     ret
 
-; rmsnorm helper: sets up DS and BX before doing rmsnorm logic
+; rmsnorm helper: sets up DS, BX and ES:DI before doing rmsnorm logic on R_XB
 ; in AX:      weight segment base
-; in ES:DI:   output buffer
 do_rmsnorm:
-        mov cx, [es:CUR_LAYER]
-        shl cx, 4
-        add ax, cx
-        mov ds, ax
-        xor bx, bx
+    mov cx, [es:CUR_LAYER]
+    shl cx, 4
+    add ax, cx
+    mov ds, ax
+    xor bx, bx
+    mov di, R_XB
 
 ; Compute RMSNorm: out[i] = x[i] * w[i] / sqrt(mean(x^2) + epsilon)
 ; in  ES:DI: output buffer (FP16.16[DIM])
@@ -234,7 +239,7 @@ rmsnorm:
 .sum:
     es lodsd                    ; eax = x[i], SI+=4
     imul eax                    ; edx:eax = x[i]^2
-    Q16_SHIFT_INLINE            ; eax = x[i]^2 in FP16.16
+    call q16_shift              ; eax = x[i]^2 in FP16.16
     add ebp, eax                ; ebp += x[i]^2
     loop .sum
 
@@ -254,7 +259,7 @@ rmsnorm:
 .norm:
     es lodsd              ; eax = x[i], SI += 4
     imul ebp              ; eax = x[i] * (1/sqrt(ss))
-    Q16_SHIFT_INLINE
+    call q16_shift        
     imul dword [bx]       ; eax *= w[i]
     Q16_SHIFT_INLINE      ; eax = x[i] * w[i] / sqrt(ss)
     add bx, 4             ; advance weight pointer
@@ -264,59 +269,7 @@ rmsnorm:
     pop ebp
     ret
 
-; Multiply an int8 matrix by a FP16.16 vector
-; in DS:SI:     int8 weight matrix (row-major)
-; in ES:DI:     input vector (FP16.16[COLS])
-; in ES:BX:     output vector (FP16.16[ROWS])
-; in EDX:       (ROWS << 16) | COLS
-; in EBP:       FP16.16 scale factor for dequantization
-matmul:
-    pushad
-
-    mov ax, dx                  ; ax = ROWS
-    shr edx, 16                 ; dx = COLS
-
-; For each output element
-.row:
-    push ax                     ; save row count
-    push dx                     ; save cols
-    push di                     ; save input vector base
-    push bx                     ; save out
-
-    xor ebx, ebx                ; ebx = dot product accumulator
-    mov cx, dx                  ; cx = cols (loop counter)
-
-; dot product: sum(weight[col] * input[col])
-.dot:
-    lodsb                       ; al = int8 weight, SI += 1
-    ; sign-extend
-    cbw                     
-    cwde
-    imul dword [es:di]          ; edx:eax = weight * input[col]
-    scasd                       ; di += 4
-    add ebx, eax                ; accumulate low 32 bits (should be safe for DIM=64)
-    loop .dot
-
-; dequantize: (acc * scale) >> 16
-    mov eax, ebx
-    imul ebp                    ; edx:eax = acc * scale
-    call q16_shift              ; eax = result in FP16.16
-
-; Store result
-    pop bx
-    mov [es:bx], eax
-    add bx, 4                   ; advance output pointer
-
-    pop di
-    pop dx
-    pop ax
-    dec ax
-    jnz .row
-
-    popad
-    ret
-
-; It is slower to always call this function but it saves two bytes each time!
+; It is slower to always call this function but it saves one byte each time!
 q16_shift:
     shrd eax, edx, 16
     ret
@@ -350,8 +303,6 @@ apply_rope:
     imul bx, [es:CUR_POS], 32   ; bx = CUR_POS * 32 (8 bytes per pair * 4 pairs per head)
     push W_FREQ_CIS
     pop ds                      ; DS = freq table
-
-
 .head_loop:
     push bx                     ; save freq table offset
     push cx                     ; save head counter
@@ -402,8 +353,6 @@ apply_rope:
     pop ebp
     ret
 
-
-
 ; Print the token string from the corresponding number.
 ; in BX: Token number
 print_token:
@@ -433,22 +382,38 @@ print_token:
 .done:
     ret
 
-; Set DS to a segmented address for KV cache access.
-; two entry points for different cache stride sizes.
-; in DX:  base segment
-; out DS: base + (CUR_LAYER * stride)
-set_seg_1024:
-    mov cl, 10
-    db 0x3D                     ; Nice!
-set_seg_128:
-    mov cl, 7
-.do_seg:
-    push ax
-    mov ax, [es:CUR_LAYER]
-    shl ax, cl                  ; ax = CUR_LAYER * stride
-    add dx, ax                  ; dx = base + layer offset
-    mov ds, dx                  ; DS = target segment
-    pop ax
+; Compute a 32-bit pointer into the KV cache for a given token and KV head.
+; Cache layout: [layer][token][kv_head] with each element being FP16.16 (4 bytes)
+; in  EDX: cache base address (K_CACHE_BASE or V_CACHE_BASE)
+; in  DI:  t (token position)
+; in  BP:  h (attention head index)
+; out EBX: absolute address of KV vector (accessed via GS)
+get_kv_ptr:
+    movzx ebx, word [es:CUR_LAYER]
+    shl ebx, 16                 ; layer * 64KB
+    add ebx, edx                ; + base
+
+    mov ax, di
+    shl ax, 7                   ; t * 128 (KV_DIM * sizeof(u32))
+
+    mov cx, bp
+    shr cx, 1                   ; cx = kvh = h / 2
+    shl cx, 5                   ; cx = kvh * 32 (HEAD_DIM * sizeof(u32))
+    add ax, cx
+    movzx eax, ax               ; zero extend to 32-bits
+    add ebx, eax                ; final address
+    ret
+
+; Compute a pointer into the attention score buffer.
+; R_ATT layout is [head][token], each element being FP16.16
+; in BP:  h (head index)
+; in DI:  t (token position)
+; out SI: &R_ATT[h][t]
+get_att_ptr:
+    imul si, bp, 2048      ; h * 2048 (SEG * 4 bytes)
+    add si, R_ATT          ; SI = base of this head's attention scores
+    imul cx, di, 4         ; cx = t * 4 (4 bytes per score)
+    add si, cx             ; SI = &R_ATT[h][t]
     ret
 
 ; Data section
@@ -460,44 +425,19 @@ dap:
     dw 0x2000                   ; target segment
     dq 3                        ; start lba (sector 2)
 
+gdt_desc:
+    dw 0x0F                     ; limit
+    dd gdt                      ; base
+
 _bootsector_end:
 %assign bootsector_size _bootsector_end - $$
 %warning boot sector is bootsector_size bytes.
 times 510 - ($ - $$) db 0
 dw 0xAA55
 
-
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Sector 1 and 2                                                             ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-; Compute the byte offset into the KV cache for a given token and KV head
-; The cache layout is [token][kv_head][DIM] with each element being int8
-; in DI:   t (token position)
-; in BP:   h (attention head index)
-; out BX:  t * KV_DIM + kvh * HEAD_DIM
-get_kv_offset:
-    mov bx, di
-    shl bx, 5  ; bx = t * 32 (KV_DIM bytes per token)
-    mov cx, bp ; cx = h
-    shr cx, 1  ; cx = kvh = h / 2 (2 attention heads share each KV head)
-    shl cx, 3  ; cx = kvh * 8 (HEAD_DIM bytes per KV head)
-    add bx, cx ; bx = offset of this token's KV head slice
-    ret
-
-; Compute a pointer into the attention score buffer.
-; R_ATT layout is [head][token], each element being FP16.16
-; in BP:  h (head index)
-; in DI:  t (token position)
-; out SI: &R_ATT[h][t]
-get_att_ptr:
-    imul si, bp, 2048	   ; h * 2048 (SEG * 4 bytes)
-    add si, R_ATT          ; SI = base of this head's attention scores
-    imul cx, di, 4         ; cx = t * 4 (4 bytes per score)
-    add si, cx             ; SI = &R_ATT[h][t]
-    ret
-
 
 ; matmul helper: 
 ; in AX:   base_Q
@@ -520,70 +460,75 @@ do_matmul:
 
     xor si, si                ; SI=0: matmul reads DS:SI starting from weight row 0
     pop bx                    ; restore out_ptr
-    jmp matmul
+	; fallthrough into matmul
 
-; Quantize K/V to int8 and save to cache
-; Uses absmax quantization: scale = max(|x|) / 127, then q = round(x / scale)
-; in DI: input vector (FP16.16[KV_DIM])
-; in AX: int8 cache segment base (KC_SEG or VC_SEG)
-; in DX: scale segment base (KS_SEG or VS_SEG)
-quant_cache:
-    push ebp
-    push ax                     ; save cache segment base
-    push dx                     ; save scale segment base
+; Multiply an int8 matrix by a FP16.16 vector
+; in DS:SI:     int8 weight matrix (row-major)
+; in ES:DI:     input vector (FP16.16[COLS])
+; in ES:BX:     output vector (FP16.16[ROWS])
+; in EDX:       (ROWS << 16) | COLS
+; in EBP:       FP16.16 scale factor for dequantization
+matmul:
+    pushad
 
-    ; Find max absolute value
-    mov cx, KV_DIM
-    push di                     ; save for pass 2
-    xor ebx, ebx                ; ebx = running_max
-.max_lp:
-    mov eax, [es:di]
-    cdq                         ; sign-extend into edx
-    xor eax, edx                
-    sub eax, edx                ; eax = abs(eax)
-    cmp eax, ebx
-    jle .not_max
-    mov ebx, eax                ; new max
-.not_max:
-    scasd                       ; DI += 4
-    loop .max_lp
-    pop di
+    mov ax, dx                  ; ax = ROWS
+    shr edx, 16                 ; dx = COLS
 
-; Compute scale (max / 127)
-.do_scale:
+; For each output element
+.row:
+    push ax                     ; save row count
+    push dx                     ; save cols
+    push di                     ; save input vector base
+    push bx                     ; save out
+
+    xor ebx, ebx                ; ebx = dot product accumulator
+    mov cx, dx                  ; cx = cols (loop counter)
+
+; dot product: sum(weight[col] * input[col])
+.dot:
+    lodsb                       ; al = int8 weight, SI += 1
+    ; sign-extend
+    cbw                     
+    cwde
+    imul dword [es:di]          ; edx:eax = weight * input[col]
+    scasd                       ; di += 4
+    add ebx, eax                ; accumulate low 32 bits (should be safe for DIM=64)
+    loop .dot
+
     mov eax, ebx
-    cdq
-    push dword 127
-    pop ebp
-    idiv ebp                    ; eax = max / 127
-    test ax, ax
-    jnz .scale_ok
-    inc ax                      ; clamp to 1
-.scale_ok:
-    xchg ebp, eax               ; ebp = scale
+    imul ebp                    ; edx:eax = acc * scale
+    call q16_shift              ; eax = result in FP16.16
 
-    ; store scale
-    pop dx
-    call set_seg_128            ; DS = scale cache segment for this layer
-    imul bx, [es:CUR_POS], 4
-    mov [bx], ebp               ; scale_cache[bx] = scale
+    ; Store result
+    pop bx
+    mov [es:bx], eax
+    add bx, 4                   ; advance output pointer
 
-    ; quantize and cache
+    pop di
     pop dx
-    call set_seg_1024           ; DS = int8 cache segment for this layer
-    mov bx, [es:CUR_POS]
-    shl bx, 5
+    pop ax
+    dec ax
+    jnz .row
+
+    popad
+    ret
+
+; Store a FP16.16 KV vector into the flat KV cache at the current position.
+; in  DI:  source vector (ES:DI, FP16.16[KV_DIM])
+; in  EDX: cache base address (K_CACHE_BASE or V_CACHE_BASE)
+cache_kv:
+    pushad
+    mov si, di
+    mov di, [es:CUR_POS]        ; DI = t
+    xor bp, bp                  ; BP = 0 (head 0, so get_kv_ptr gets the start of token slice)
+    call get_kv_ptr             ; ebx = address of cache slot
     mov cx, KV_DIM
-.q_lp:
-    mov eax, [es:di]
-    cdq
-    idiv ebp                    ; eax = round(x/scale), clamped to int8
-    mov [bx], al                ; store quantized byte
-    inc bx
-    scasd                       ; DI+=4
-    loop .q_lp
-
-    pop ebp
+.lp:
+    es lodsd                    ; eax = src[i], SI += 4
+    mov [gs:ebx], eax           ; cache[t][0][i] = eax
+    add ebx, 4
+    loop .lp
+    popad
     ret
 
 ; Full forward pass of the transformer for one token.
@@ -605,10 +550,7 @@ forward:
 .layer:
     ; Normalize input before attention
     mov ax, W_RMS_ATT
-    mov di, R_XB
     call do_rmsnorm             ; R_XB = rmsnorm(R_X, w_rms_att[layer])
-
-
 
     ; Project normalized input to Q, K, V simultaneously
     mov si, W_WQKV_S
@@ -619,30 +561,23 @@ forward:
     mov bx, R_QKV
     call do_matmul              ; R_QKV = [Q | K | V] = w_wqkv * R_XB
 
-
     ; Apply RoPE to Q and K
     mov di, R_QKV
     mov cx, HEADS
     call apply_rope             ; rotate Q
 
-
     mov di, R_QKV + DIM * 4     ; K starts after Q
     mov cx, KV_HEADS
     call apply_rope             ; rotate K
 
-
-
-    ; Quantize and cache K and V for this position
+    ; cache K and V for this position
     mov di, R_QKV + DIM*4
-    mov ax, KC_SEG
-    mov dx, KS_SEG
-    call quant_cache            ; KC[layer][pos] = quantize(K)
+    mov edx, K_CACHE_BASE
+    call cache_kv               ; KC[layer][pos] = K (FP16.16)
 
     mov di, R_QKV + DIM*4 + KV_DIM*4
-    mov ax, VC_SEG
-    mov dx, VS_SEG
-    call quant_cache            ; VC[layer][pos] = quantize(V)
-
+    mov edx, V_CACHE_BASE
+    call cache_kv               ; VC[layer][pos] = V (FP16.16)
 
     ; Compute attention scores, softmax and weight sum of V
     call attention              ; R_XB = attention(Q, KC, VC)
@@ -660,10 +595,8 @@ forward:
     call vadd_rx                ; R_X += R_XB2
 
     ; FFN
-
     ; Normalize before FFN
     mov ax, W_RMS_FFN
-    mov di, R_XB
     call do_rmsnorm             ; R_XB = rmsnorm(R_X, w_rms_ffn[layer])
 
     ; Project up to hidden dim
@@ -713,7 +646,6 @@ forward:
 ; dot product of the final hidden state with embedding[i].
 .lm_loop:
     mov ax, W_TOKEN_EMB
-    mov cx, di
     imul cx, di, 16             ; token i * 16 paragraphs
     add ax, cx
     mov ds, ax                  ; DS = embedding[i] segment
@@ -725,7 +657,7 @@ forward:
 .dot:
     es lodsd                    ; eax = R_X[j], SI += 4
     imul dword [bx]             ; edx:eax = R_X[j] * embedding[i][j]
-    call q16_shift              ; inline this for more perf, but it'll cost you two bytes!
+    call q16_shift              ; inline this for more perf, but it'll cost you more bytes!
     add ebp, eax                ; accumulate
     add bx, 4                   ; advance pointer
     loop .dot
@@ -744,9 +676,15 @@ forward:
     ret
 
 ; Compute multi-head grouped-query attention for the current position.
-; Reads Q from R_QKV, K/V from the quantized KV cache.
+; Reads Q from R_QKV, K/V from the KV cache.
 ; Output is written into R_XB (one HEAD_DIM slice per head).
 attention:
+    ; clear R_XB
+    mov di, R_XB
+    mov cx, DIM
+    xor eax, eax
+    rep stosd
+
     mov cx, HEADS
     xor bp, bp                  ; bp = h (head index, 0..HEADS-1)
 .head_loop:
@@ -762,9 +700,8 @@ attention:
     push cx                     ; save token counter
 
     ; load K vector for token T, KV head kvh = h/2
-    mov dx, KC_SEG
-    call set_seg_1024           ; DS = int8 K cache for this layer
-    call get_kv_offset          ; BX = offset of K[t][kvh]
+    mov edx, K_CACHE_BASE
+    call get_kv_ptr  
 
     ; Load Q vector for head h
     mov si, bp
@@ -776,30 +713,19 @@ attention:
     mov cx, HEAD_DIM
     xor ebp, ebp                ; acc
 
-; dot(Q_h, K_t), K is int8, Q is FP16.16
+; dot(Q_h, K_t)
 .dot_loop:
-    movsx eax, byte [bx]        ; eax = K
-    inc bx
+    mov eax, [gs:ebx]           ; eax = K
+    add ebx, 4
     imul dword [es:si]          ; edx:eax = K[t][i] * Q[h][i]
+    call q16_shift                          
     add si, 4
     add ebp, eax                ; accumulate (low 32 bits enough for HEAD_DIM=8)
     loop .dot_loop
-
 .dot_done:
     xchg eax, ebp
     pop bp                      ; restore h
     pop di                      ; restore t
-
-    ; Dequantize: multiply by K scale for token t
-    mov dx, KS_SEG
-    call set_seg_128            ; DS = K scale cache for this layer
-
-    mov si, di
-    shl si, 2                   ; t * 4
-    mov esi, [si]               ; esi = scale_kt
-
-    imul esi
-    call q16_shift              ; eax = dot * scale_kt
 
     ; multiply by 1/sqrt(HEAD_DIM) ~= 23170
     mov esi, 23170
@@ -850,11 +776,9 @@ attention:
     jle .s_ok
     mov ax, 511
 .s_ok:
-    push di
-    mov di, ax
-    shl di, 2                   ; di = index * 4
-    mov edx, [fs:di]            ; edx = exp_lut[diff]
-    pop di                  
+    shl ax, 2                   ; di = index * 4
+    xchg ax, bx
+    mov edx, [fs:bx]            ; edx = exp_lut[diff]
     pop eax                     ; restore max
 
     mov [es:di], edx            ; replace score with exp
@@ -876,15 +800,7 @@ attention:
     ; 3. Weighted sum of V
     ; out[h] = sum over t of (attention[h][t] * V[t])
 .agg:
-    ; Clear r_xb[h] before accumulating
-    mov bx, bp
-    shl bx, 5                   ; h * 32
-    add bx, R_XB
-    mov di, bx
-    xor eax, eax
-    mov cx, HEAD_DIM
-    rep stosd                   ; zero out R_XB[h]
-
+    ; Weighted sum of V: R_XB[h] += att[h][t] * V[t] for each past token t
     mov cx, [es:CUR_POS]
     inc cx
     xor di, di                  ; DI = t
@@ -892,41 +808,31 @@ attention:
     push cx
 
     ; Load V vector for token t, KV head kvh = h/2
-    mov dx, VC_SEG
-    call set_seg_1024           ; DS =  V cache for this layer
-    call get_kv_offset          ; BX = offset of V[t][kvh]
+    mov edx, V_CACHE_BASE
+    call get_kv_ptr 
 
     ; a_t = R_ATT[h][t]
     call get_att_ptr            ; SI = &R_ATT[h][t]
     mov eax, [es:si]            ; eax = a_t
 
-    ; Dequantize V: multiply a_t by V scale for token t
-    push ds
-    mov dx, VS_SEG
-    call set_seg_128            ; DS = V scale cache for this layer
-    mov si, di
-    shl si, 2                   ; t * 4
-    mov edx, [si]               ; edx = scale_vt
-    pop ds                      ; restore DS = VC_SEG
-
-    imul edx
-    call q16_shift              ; eax = a_scaled = a_t * scale_vt
-
-    ; Accumulate: R_XB[h] += a_scale * V[t]
-    mov edx, eax                ; edx = a_scaled
     mov si, bp
     shl si, 5                   ; h * 32
     add si, R_XB                ; SI = &R_XB[h]
 
+    push bp
+    mov ebp, eax
+
     mov cx, HEAD_DIM
 .v_mac:
-    movsx eax, byte [bx]        ; eax = V[t][i] (int8)
-    inc bx
-    imul eax, edx               ; eax = V[t][i] * a_scaled
+    mov eax, [gs:ebx]        ; eax = V[t][i] (int8)
+    add ebx, 4
+    imul ebp                 ; eax = V[t][i] * a_scaled
+    call q16_shift
     add [es:si], eax
     add si, 4
     loop .v_mac
 
+    pop bp
     inc di                      ; t++
     pop cx
     loop .v_loop
@@ -970,6 +876,12 @@ silu_gate:
     stosd                       ; gate[i] = res, DI += 4
     loop .lp
     ret
+
+
+; Data for boot sector
+gdt:
+    dq 0                        ; null
+    dq 0x00CF92000000FFFF       ; data
 
 _code_end:
 %assign code_size _code_end - $$
