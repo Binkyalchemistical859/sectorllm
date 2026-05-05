@@ -22,11 +22,11 @@ org 0x7c00
 %define LAYERS 5
 %define HEADS 8
 %define KV_HEADS 4
-%define VOCAB 512				; Vocab size
-%define SEQ 512 				; Maximum input sequence length
+%define VOCAB 512               ; Vocab size
+%define SEQ 512                 ; Maximum input sequence length
 %define HEAD_DIM (DIM / HEADS)
 %define KV_DIM (KV_HEADS * HEAD_DIM)
-%define TOKEN_COUNT 300 		; Maximum token count to generate
+%define TOKEN_COUNT 300         ; Maximum token count to generate
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -37,7 +37,7 @@ org 0x7c00
 ; Sizes in paragraphs
 
 ; Precomputed lookup tables (exp and silu)
-%define P_LUT       0x180		; 6144 bytes
+%define P_LUT       0x180       ; 6144 bytes
 %define P_TOKEN_EMB (VOCAB * DIM * 4 / 16)
 ; Attention pre-RMSNorm weights
 %define P_RMS_ATT   (LAYERS * DIM * 4 / 16)
@@ -88,20 +88,20 @@ org 0x7c00
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Scratch data (ES)                                                          ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-%define R_X       0x0000	; FP16.16[DIM]
-%define R_XB      0x0100 	; FP16.16[DIM]
+%define R_X       0x0000    ; FP16.16[DIM]
+%define R_XB      0x0100    ; FP16.16[DIM]
 %define R_XB2     0x0200    ; FP16.16[VOCAV] (overlaps R_QKV and R_HB)
-%define R_QKV     0x0300 	; 384 bytes (Q=64, K=16, V=16)
-%define R_HB      0x0480 	; FP16.16[HIDDEN]
+%define R_QKV     0x0300    ; 384 bytes (Q=64, K=16, V=16)
+%define R_HB      0x0480    ; FP16.16[HIDDEN]
 
 ; Global State Variables
-%define R_MAX     0x09E0 	; dword
-%define R_BEST    0x09E4 	; word
-%define CUR_LAYER 0x09E6 	; word
-%define CUR_POS   0x09E8 	; word
+%define R_MAX     0x09E0    ; dword
+%define R_BEST    0x09E4    ; word
+%define CUR_LAYER 0x09E6    ; word
+%define CUR_POS   0x09E8    ; word
 
-%define R_ATT     0x0A00 	; FP16.16[TOKEN_COUNT*HEADS]
-	
+%define R_ATT     0x0A00    ; FP16.16[TOKEN_COUNT*HEADS]
+    
 
 ; Cache Segments
 %define KC_SEG 0x0840
@@ -113,8 +113,8 @@ org 0x7c00
 %macro Q16_SHIFT_INLINE 0
     shrd eax, edx, 16
 %endmacro
-	
-	
+    
+    
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Boot sector                                                                ;;
@@ -122,20 +122,20 @@ org 0x7c00
 ; The boot sector loads the second stage and model data from disk.
 ; It also contains the main inference loop and utility subroutines.
 entry:
-	; Set up segments
-	xor ax, ax
-	mov ds, ax
-	mov ss, ax
-	mov es, ax
-	mov sp, 0x7C00
+    ; Set up segments
+    xor ax, ax
+    mov ds, ax
+    mov ss, ax
+    mov es, ax
+    mov sp, 0x7C00
 
     ; Load stage2
     mov bx, 0x7E00
-    mov ax, 0x0202 				; AH=02 read, AL=2 sectors
-    mov cx, 0x0002 				; CH=0 cylinder, CL=2 sector
-	xor dh, dh
+    mov ax, 0x0202              ; AH=02 read, AL=2 sectors
+    mov cx, 0x0002              ; CH=0 cylinder, CL=2 sector
+    xor dh, dh
     int 0x13
-	; assume no error ;)
+    ; assume no error ;)
 
     ; Set up scratch segment (ES)
     push 0x8000
@@ -146,30 +146,30 @@ entry:
     mov si, dap
 
 .load_model:
-	mov ah, 0x42
-	int 0x13
+    mov ah, 0x42
+    int 0x13
 
     add dword [si + 6], 0x00400800 ; add 64 to lba, 0x800 to segment
     loop .load_model
 
 start_inference:
-	mov [es:CUR_POS], cx 		; cur_pos=0
-	mov bx, 1					; BOS
-	push 0x2000 				; LUT segment
-	pop fs
+    mov [es:CUR_POS], cx        ; cur_pos=0
+    mov bx, 1                   ; BOS
+    push 0x2000                 ; LUT segment
+    pop fs
 
 .gen_loop:
-	call forward
-	cmp bx, 2					; check for BOS or EOS
-	jbe .halt
-	push bx
-	call print_token
-	pop bx
-	inc word [es:CUR_POS]
-	cmp word [es:CUR_POS], TOKEN_COUNT
-	jl .gen_loop
+    call forward
+    cmp bx, 2                   ; check for BOS or EOS
+    jbe .halt
+    push bx
+    call print_token
+    pop bx
+    inc word [es:CUR_POS]
+    cmp word [es:CUR_POS], TOKEN_COUNT
+    jl .gen_loop
 .halt:
-	jmp $
+    jmp $
 
 
 ; Inverse square root approximation
@@ -180,7 +180,7 @@ inv_sqrt:
     push ebx
     push esi
 
-    mov ebx, eax				; save x
+    mov ebx, eax                ; save x
 
     ; Initial guess from bit position: y ~= 2^((48-bsr(x))/2)
     bsr ecx, eax
@@ -188,22 +188,22 @@ inv_sqrt:
     add cl, 48
     shr cl, 1
     xor eax, eax
-    bts eax, ecx				; eax = (1<<ecx), initial y
-    mov cl, 5					; Should be good enough
+    bts eax, ecx                ; eax = (1<<ecx), initial y
+    mov cl, 5                   ; Should be good enough
 
 ; Newton-Raphson: y = y * (3 - x*y^2) / 2
 .loop:
-	mov esi, eax				; esi = y
-	mul eax						; edx:eax = y^2
-	call q16_shift				; convert to FP16.16
-	mul ebx						; edx:eax = x*y^2
-	call q16_shift				; convert to FP16.16
-	neg eax                     ; eax = -x*y^2
-	add eax, 3*65536            ; eax = 3 - x*y^2 (FP16.16)
-	mul esi
-	call q16_shift              ; eax = y*(3 - x*y^2) (FP16.16)
-	shr eax, 1					; / 2
-	loop .loop
+    mov esi, eax                ; esi = y
+    mul eax                     ; edx:eax = y^2
+    call q16_shift              ; convert to FP16.16
+    mul ebx                     ; edx:eax = x*y^2
+    call q16_shift              ; convert to FP16.16
+    neg eax                     ; eax = -x*y^2
+    add eax, 3*65536            ; eax = 3 - x*y^2 (FP16.16)
+    mul esi
+    call q16_shift              ; eax = y*(3 - x*y^2) (FP16.16)
+    shr eax, 1                  ; / 2
+    loop .loop
 .done:
     pop esi
     pop ebx
@@ -226,43 +226,43 @@ do_rmsnorm:
 rmsnorm:
     push ebp
 
-    xor ebp, ebp 				; ebp = sum of squares accumulator
+    xor ebp, ebp                ; ebp = sum of squares accumulator
     mov cx, DIM
-	xor si, si 					; SI=0, points to ES:R_X
-    push si 					
+    xor si, si                  ; SI=0, points to ES:R_X
+    push si                     
 
 ; 1. Compute sum of squares
 .sum:
-	es lodsd					; eax = x[i], SI+=4
-	imul eax 					; edx:eax = x[i]^2
-	Q16_SHIFT_INLINE 		    ; eax = x[i]^2 in FP16.16
-	add ebp, eax                ; ebp += x[i]^2
-	loop .sum
+    es lodsd                    ; eax = x[i], SI+=4
+    imul eax                    ; edx:eax = x[i]^2
+    Q16_SHIFT_INLINE            ; eax = x[i]^2 in FP16.16
+    add ebp, eax                ; ebp += x[i]^2
+    loop .sum
 
 .eps:
     ; ss = (sum / DIM) + epsilon
     mov eax, ebp
-    shr eax, DIM_LOG			; eax = sum/DIM
+    shr eax, DIM_LOG            ; eax = sum/DIM
     inc eax ; epsilon
 
-    call inv_sqrt 				; eax = 1/sqrt(ss) in FP16.16
-    mov ebp, eax				; ebp = normalization scale
+    call inv_sqrt               ; eax = 1/sqrt(ss) in FP16.16
+    mov ebp, eax                ; ebp = normalization scale
 
-    pop si 						; restore SI to R_X
+    pop si                      ; restore SI to R_X
     mov cx, DIM
 
 ; 2. Normalize and apply weights
 .norm:
-	es lodsd			  ; eax = x[i], SI += 4
-	imul ebp			  ; eax = x[i] * (1/sqrt(ss))
-	call q16_shift
-	imul dword [bx]		  ; eax *= w[i]
-	call q16_shift        ; eax = x[i] * w[i] / sqrt(ss)
-	add bx, 4			  ; advance weight pointer
-	stosd				  ; write to output, DI += 4
-	loop .norm
+    es lodsd              ; eax = x[i], SI += 4
+    imul ebp              ; eax = x[i] * (1/sqrt(ss))
+    call q16_shift
+    imul dword [bx]       ; eax *= w[i]
+    call q16_shift        ; eax = x[i] * w[i] / sqrt(ss)
+    add bx, 4             ; advance weight pointer
+    stosd                 ; write to output, DI += 4
+    loop .norm
 .done:
-	pop ebp
+    pop ebp
     ret
 
 ; Multiply an int8 matrix by a FP16.16 vector
@@ -274,39 +274,39 @@ rmsnorm:
 matmul:
     pushad
 
-    mov ax, dx					; ax = ROWS
-    shr edx, 16 				; dx = COLS
+    mov ax, dx                  ; ax = ROWS
+    shr edx, 16                 ; dx = COLS
 
 ; For each output element
 .row:
-	push ax						; save row count
-	push dx 					; save cols
-	push di						; save input vector base
-	push bx						; save out
+    push ax                     ; save row count
+    push dx                     ; save cols
+    push di                     ; save input vector base
+    push bx                     ; save out
 
-    xor ebx, ebx				; ebx = dot product accumulator
-    mov cx, dx          		; cx = cols (loop counter)
+    xor ebx, ebx                ; ebx = dot product accumulator
+    mov cx, dx                  ; cx = cols (loop counter)
 
 ; dot product: sum(weight[col] * input[col])
 .dot:
-	lodsb 						; al = int8 weight, SI += 1
-	; sign-extend
-    cbw						
+    lodsb                       ; al = int8 weight, SI += 1
+    ; sign-extend
+    cbw                     
     cwde
-    imul dword [es:di]			; edx:eax = weight * input[col]
-    scasd 						; di += 4
-    add ebx, eax				; accumulate low 32 bits (should be safe for DIM=64)
+    imul dword [es:di]          ; edx:eax = weight * input[col]
+    scasd                       ; di += 4
+    add ebx, eax                ; accumulate low 32 bits (should be safe for DIM=64)
     loop .dot
 
 ; dequantize: (acc * scale) >> 16
-	mov eax, ebx
-    imul ebp					; edx:eax = acc * scale
-    call q16_shift 				; eax = result in FP16.16
+    mov eax, ebx
+    imul ebp                    ; edx:eax = acc * scale
+    call q16_shift              ; eax = result in FP16.16
 
 ; Store result
     pop bx
     mov [es:bx], eax
-    add bx, 4					; advance output pointer
+    add bx, 4                   ; advance output pointer
 
     pop di
     pop dx
@@ -326,20 +326,20 @@ q16_shift:
 ; in ES:BX: matmul output
 ; Convenience wrapper around vadd for post-matmul accumulation (saves bytes)
 vadd_rx:
-	mov si, bx					; grab pointer from matmul
-	xor di, di					; R_X
+    mov si, bx                  ; grab pointer from matmul
+    xor di, di                  ; R_X
 
 ; Vector addition: ES:DI += ES:SI for DIM FP16.16 elements
 ; in ES:SI: src vector (FP16.16[DIM])
 ; in ES:DI: dest vector (FP16.16[DIM])
 vadd:
-	mov cx, DIM
+    mov cx, DIM
 .lp:
-	es lodsd					; eax = *SI, SI += 4
-	add [es:di], eax			; *DI += eax
-	scasd						; DI += 4
-	loop .lp
-	ret
+    es lodsd                    ; eax = *SI, SI += 4
+    add [es:di], eax            ; *DI += eax
+    scasd                       ; DI += 4
+    loop .lp
+    ret
 
 ; Apply RoPE to a vector in-place.
 ; Rotates each consecutive pair (x0, x1) by the angle for its position,
@@ -349,53 +349,53 @@ vadd:
 apply_rope:
     push ebp
     mov bx, [es:CUR_POS]
-    shl bx, 5 					; bx = CUR_POS * 32 (8 bytes per pair * 4 pairs per head)
+    shl bx, 5                   ; bx = CUR_POS * 32 (8 bytes per pair * 4 pairs per head)
     push W_FREQ_CIS
-    pop ds						; DS = freq table
+    pop ds                      ; DS = freq table
 
 
 .head_loop:
-    push bx 					; save freq table offset
-    push cx						; save head counter
-    mov cx, 4					; 4 pairs per head
+    push bx                     ; save freq table offset
+    push cx                     ; save head counter
+    mov cx, 4                   ; 4 pairs per head
 
 .pair_loop:
     ; Load sin and cos values
-    mov ebp, [bx] 				; ebp = cos
-    mov esi, [bx+4]				; esi = sin
+    mov ebp, [bx]               ; ebp = cos
+    mov esi, [bx+4]             ; esi = sin
 
-	; Rotate (x0, x1):
+    ; Rotate (x0, x1):
     ;   new_x0 = x0*cos - x1*sin
     ;   new_x1 = x0*sin + x1*cos
-    mov eax, [es:di+4]			; x1
-    imul esi					; x1*sin
-	Q16_SHIFT_INLINE   
-    push eax					; stack = x1*sin
+    mov eax, [es:di+4]          ; x1
+    imul esi                    ; x1*sin
+    Q16_SHIFT_INLINE   
+    push eax                    ; stack = x1*sin
 
-    mov eax, [es:di]			; x0
-    imul ebp					; x0 * cos
+    mov eax, [es:di]            ; x0
+    imul ebp                    ; x0 * cos
     Q16_SHIFT_INLINE
-    pop edx						; edx = x1*sin
-    sub eax, edx				; new_x0 = (x0*cos)-(x1*sin)
-    push eax					; stack = new_x0
+    pop edx                     ; edx = x1*sin
+    sub eax, edx                ; new_x0 = (x0*cos)-(x1*sin)
+    push eax                    ; stack = new_x0
 
-    mov eax, [es:di+4]			; x1
-    imul ebp					; x1*cos
+    mov eax, [es:di+4]          ; x1
+    imul ebp                    ; x1*cos
     Q16_SHIFT_INLINE
-    push eax					; stack = x1*cos, new_x0
+    push eax                    ; stack = x1*cos, new_x0
 
-    mov eax, [es:di]			; x0
-    imul esi					; x0*sin
+    mov eax, [es:di]            ; x0
+    imul esi                    ; x0*sin
     Q16_SHIFT_INLINE
-    pop edx						; edx = x1*cos
-    add eax, edx				; eax = x0*sin+x1*cos
+    pop edx                     ; edx = x1*cos
+    add eax, edx                ; eax = x0*sin+x1*cos
 
-    mov [es:di+4], eax			; store new_x1
-    pop eax						; eax = new_x0
-    mov [es:di], eax			; store new_x0
+    mov [es:di+4], eax          ; store new_x1
+    pop eax                     ; eax = new_x0
+    mov [es:di], eax            ; store new_x0
 
-    add bx, 8					; advance to next (cos, sin) pair
-    add di, 8					; advance to next (x0, x1) pair
+    add bx, 8                   ; advance to next (cos, sin) pair
+    add di, 8                   ; advance to next (x0, x1) pair
     loop .pair_loop
 
     pop cx
@@ -409,28 +409,28 @@ apply_rope:
 ; Print the token string from the corresponding number.
 ; in BX: Token number
 print_token:
-	push VOCAB_PTR 				; DS = VOCAB_PTR
-	pop ds
-	mov cx, bx					; cx = token index (loop counter)
-	xor si, si					; SI = 0
+    push VOCAB_PTR              ; DS = VOCAB_PTR
+    pop ds
+    mov cx, bx                  ; cx = token index (loop counter)
+    xor si, si                  ; SI = 0
 
-	; Each entry is [int32 score][null-terminated string]
+    ; Each entry is [int32 score][null-terminated string]
 .find:
     lodsd                       ; skip int32 score, SI += 4
 .skip_str:
-    lodsb					    ; c=VOCAB_PTR[SI++]
+    lodsb                       ; c=VOCAB_PTR[SI++]
     test al, al
-    jnz .skip_str			    ; loop until NULL
-    loop .find 				    ; next token
+    jnz .skip_str               ; loop until NULL
+    loop .find                  ; next token
 .print:
     lodsd                       ; skip int32 score, SI += 4
-    mov ah, 0x0E	            ; teletype out
-    xor bh, bh			        ; page 0
+    mov ah, 0x0E                ; teletype out
+    xor bh, bh                  ; page 0
 .print_str:
-    lodsb			          	; c=VOCAB_PTR[SI++]
+    lodsb                       ; c=VOCAB_PTR[SI++]
     test al, al
-    jz .done			        ; stop at NULL
-    int 0x10			        ; print c
+    jz .done                    ; stop at NULL
+    int 0x10                    ; print c
     jmp .print_str
 .done:
     ret
@@ -440,27 +440,27 @@ print_token:
 ; in DX:  base segment
 ; out DS: base + (CUR_LAYER * stride)
 set_seg_1024:
-	mov cl, 10
-	db 0x3D						; Nice!
+    mov cl, 10
+    db 0x3D                     ; Nice!
 set_seg_128:
-	mov cl, 7
+    mov cl, 7
 .do_seg:
-	push ax
+    push ax
     mov ax, [es:CUR_LAYER]
-    shl ax, cl					; ax = CUR_LAYER * stride
-    add dx, ax					; dx = base + layer offset
-    mov ds, dx					; DS = target segment
-	pop ax
+    shl ax, cl                  ; ax = CUR_LAYER * stride
+    add dx, ax                  ; dx = base + layer offset
+    mov ds, dx                  ; DS = target segment
+    pop ax
     ret
 
 ; Data section
 dap:
-    db 0x10						; size of DAP
-    db 0						; reserved
-    dw 64              			; number of sectors to read
-    dw 0x0000					; target offset
-    dw 0x2000					; target segment
-    dq 3						; start lba (sector 2)
+    db 0x10                     ; size of DAP
+    db 0                        ; reserved
+    dw 64                       ; number of sectors to read
+    dw 0x0000                   ; target offset
+    dw 0x2000                   ; target segment
+    dq 3                        ; start lba (sector 2)
 
 _bootsector_end:
 %assign bootsector_size _bootsector_end - $$
@@ -496,10 +496,10 @@ get_kv_offset:
 get_att_ptr:
     mov si, bp
     shl si, 11      ; SI = h * 2048 (SEQ * 4 bytes)
-    add si, R_ATT	; SI = base of this head's attention scores
+    add si, R_ATT   ; SI = base of this head's attention scores
     mov cx, di
-    shl cx, 2		; cx = t * 4 (4 bytes per score)
-    add si, cx		; SI = &R_ATT[h][t]
+    shl cx, 2       ; cx = t * 4 (4 bytes per score)
+    add si, cx      ; SI = &R_ATT[h][t]
     ret
 
 
@@ -532,23 +532,23 @@ do_matmul:
 ; in DX: scale segment base (KS_SEG or VS_SEG)
 quant_cache:
     push ebp
-    push ax						; save cache segment base
-    push dx						; save scale segment base
+    push ax                     ; save cache segment base
+    push dx                     ; save scale segment base
 
-	; Find max absolute value
+    ; Find max absolute value
     mov cx, KV_DIM
-    push di						; save for pass 2
-    xor ebx, ebx				; ebx = running_max
+    push di                     ; save for pass 2
+    xor ebx, ebx                ; ebx = running_max
 .max_lp:
     mov eax, [es:di]
-    cdq							; sign-extend into edx
-    xor eax, edx				
-    sub eax, edx				; eax = abs(eax)
+    cdq                         ; sign-extend into edx
+    xor eax, edx                
+    sub eax, edx                ; eax = abs(eax)
     cmp eax, ebx
     jle .not_max
-    mov ebx, eax 				; new max
+    mov ebx, eax                ; new max
 .not_max:
-    scasd						; DI += 4
+    scasd                       ; DI += 4
     loop .max_lp
     pop di
 
@@ -558,33 +558,33 @@ quant_cache:
     cdq
     push dword 127
     pop ebp
-    idiv ebp					; eax = max / 127
+    idiv ebp                    ; eax = max / 127
     test ax, ax
     jnz .scale_ok
-    inc ax						; clamp to 1
+    inc ax                      ; clamp to 1
 .scale_ok:
-    mov ebp, eax				; ebp = scale
+    mov ebp, eax                ; ebp = scale
 
     ; store scale
     pop dx
-    call set_seg_128			; DS = scale cache segment for this layer
-    mov bx, [es:CUR_POS]		
+    call set_seg_128            ; DS = scale cache segment for this layer
+    mov bx, [es:CUR_POS]        
     shl bx, 2
-    mov [bx], ebp       		; scale_cache[bx] = scale
+    mov [bx], ebp               ; scale_cache[bx] = scale
 
     ; quantize and cache
     pop dx
-    call set_seg_1024			; DS = int8 cache segment for this layer
+    call set_seg_1024           ; DS = int8 cache segment for this layer
     mov bx, [es:CUR_POS]
     shl bx, 5
     mov cx, KV_DIM
 .q_lp:
     mov eax, [es:di]
     cdq
-    idiv ebp					; eax = round(x/scale), clamped to int8
-    mov [bx], al				; store quantized byte
+    idiv ebp                    ; eax = round(x/scale), clamped to int8
+    mov [bx], al                ; store quantized byte
     inc bx
-    scasd 						; DI+=4
+    scasd                       ; DI+=4
     loop .q_lp
 
     pop ebp
@@ -596,79 +596,79 @@ quant_cache:
 forward:
     ; Load token embedding into R_X
     mov ax, W_TOKEN_EMB
-    shl bx, 4					; token * DIM * 4
-    add ax, bx					; ax = segment of this token's embedding
+    shl bx, 4                   ; token * DIM * 4
+    add ax, bx                  ; ax = segment of this token's embedding
     mov ds, ax
     xor si, si
-    xor di, di 					; DI = R_X
-    mov cx, DIM * 2				; dword
-    rep movsw					; R_X = embedding[token]
+    xor di, di                  ; DI = R_X
+    mov cx, DIM * 2             ; dword
+    rep movsw                   ; R_X = embedding[token]
 
-    mov [es:CUR_LAYER], cx		; cx is 0
+    mov [es:CUR_LAYER], cx      ; cx is 0
 
 .layer:
-	; Normalize input before attention
-	mov ax, W_RMS_ATT
-	mov di, R_XB
-	call do_rmsnorm 			; R_XB = rmsnorm(R_X, w_rms_att[layer])
+    ; Normalize input before attention
+    mov ax, W_RMS_ATT
+    mov di, R_XB
+    call do_rmsnorm             ; R_XB = rmsnorm(R_X, w_rms_att[layer])
 
 
 
-	; Project normalized input to Q, K, V simultaneously
+    ; Project normalized input to Q, K, V simultaneously
     mov si, W_WQKV_S
     mov ax, W_WQKV_Q
     mov cx, 0x200
     mov edx, (DIM << 16) | (DIM + 2*KV_DIM) ; rows=96 (Q+K+V), cols=64
     mov di, R_XB
     mov bx, R_QKV
-    call do_matmul				; R_QKV = [Q | K | V] = w_wqkv * R_XB
+    call do_matmul              ; R_QKV = [Q | K | V] = w_wqkv * R_XB
 
 
     ; Apply RoPE to Q and K
     mov di, R_QKV
     mov cx, HEADS
-    call apply_rope 			; rotate Q
+    call apply_rope             ; rotate Q
 
 
-    mov di, R_QKV + DIM * 4		; K starts after Q
+    mov di, R_QKV + DIM * 4     ; K starts after Q
     mov cx, KV_HEADS
-    call apply_rope 			; rotate K
+    call apply_rope             ; rotate K
 
 
 
-	; Quantize and cache K and V for this position
+    ; Quantize and cache K and V for this position
     mov di, R_QKV + DIM*4
     mov ax, KC_SEG
     mov dx, KS_SEG
-    call quant_cache			; KC[layer][pos] = quantize(K)
+    call quant_cache            ; KC[layer][pos] = quantize(K)
 
     mov di, R_QKV + DIM*4 + KV_DIM*4
     mov ax, VC_SEG
     mov dx, VS_SEG
-    call quant_cache	        ; VC[layer][pos] = quantize(V)
+    call quant_cache            ; VC[layer][pos] = quantize(V)
 
 
-	; Compute attention scores, softmax and weight sum of V
-    call attention				; R_XB = attention(Q, KC, VC)
+    ; Compute attention scores, softmax and weight sum of V
+    call attention              ; R_XB = attention(Q, KC, VC)
 
-	; Project attention output back to DIM
+    ; Project attention output back to DIM
     mov si, W_WO_S
     mov ax, W_WO_Q
     mov cx, 0x100
     mov edx, (DIM << 16) | DIM
     mov di, R_XB
     mov bx, R_XB2
-    call do_matmul				; R_XB2 = w_wo * R_XB
+    call do_matmul              ; R_XB2 = w_wo * R_XB
 
-	; Residual connection
-    call vadd_rx				; R_X += R_XB2
+    ; Residual connection
+    call vadd_rx                ; R_X += R_XB2
 
     ; FFN
 
-	; Normalize before FFN
+    ; Normalize before FFN
     mov ax, W_RMS_FFN
     mov di, R_XB
-    call do_rmsnorm 			; R_XB = rmsnorm(R_X, w_rms_ffn[layer])
+    call do_rmsnorm             ; R_XB = rmsnorm(R_X, w_rms_ffn[layer])
 
     ; Project up to hidden dim
     mov si, W_W13_S
@@ -677,7 +677,7 @@ forward:
     mov edx, (DIM << 16) | (2*HIDDEN)
     mov di, R_XB
     mov bx, R_HB
-    call do_matmul				; R_HB = [gate | up] = w_w13 * R_XB
+    call do_matmul              ; R_HB = [gate | up] = w_w13 * R_XB
 
     ; Apply SiLU gating
     call silu_gate
@@ -689,12 +689,12 @@ forward:
     mov edx, (HIDDEN << 16) | DIM
     mov di, R_HB
     mov bx, R_XB
-    call do_matmul				; R_XB = w_w2 * R_HB
+    call do_matmul              ; R_XB = w_w2 * R_HB
 
-	; Residual connection
-	call vadd_rx				; R_X + R_XB
+    ; Residual connection
+    call vadd_rx                ; R_X + R_XB
 
-	; Go to next layer
+    ; Go to next layer
     inc word [es:CUR_LAYER]
     cmp word [es:CUR_LAYER], LAYERS
     jl .layer
@@ -703,13 +703,13 @@ forward:
     push W_RMS_FINAL
     pop ds
     xor bx, bx
-    xor di, di					; R_X
-    call rmsnorm				; R_X = rmsnorm(R_X, w_rms_final)
+    xor di, di                  ; R_X
+    call rmsnorm                ; R_X = rmsnorm(R_X, w_rms_final)
 
     ; Compute logits and pick best token (use greedy argmax)
     mov dword [es:R_MAX], 0x80000000 ; INT_MIN
-    xor di, di						 ; DI = token index
-    mov word [es:R_BEST], di		 ; best = 0
+    xor di, di                       ; DI = token index
+    mov word [es:R_BEST], di         ; best = 0
 
 ; logit computation: dot(R_X, embedding[i])
 ; Since the model uses weight tying, the output projection reuses
@@ -718,31 +718,31 @@ forward:
 .lm_loop:
     mov ax, W_TOKEN_EMB
     mov cx, di
-    shl cx, 4					; token i * 16 paragraphs
+    shl cx, 4                   ; token i * 16 paragraphs
     add ax, cx
-    mov ds, ax					; DS = embedding[i] segment
+    mov ds, ax                  ; DS = embedding[i] segment
 
-    xor ebp, ebp				; ebp dot accumulator
-    xor si, si					; SI = R_X
-    xor bx, bx					; x = embedding row offset
+    xor ebp, ebp                ; ebp dot accumulator
+    xor si, si                  ; SI = R_X
+    xor bx, bx                  ; x = embedding row offset
     mov cx, DIM
 .dot:
-    es lodsd					; eax = R_X[j], SI += 4
-    imul dword [bx]				; edx:eax = R_X[j] * embedding[i][j]
-    call q16_shift	            ; inline this for more perf, but it'll cost you two bytes!
-    add ebp, eax				; accumulate
-    add bx, 4					; advance pointer
+    es lodsd                    ; eax = R_X[j], SI += 4
+    imul dword [bx]             ; edx:eax = R_X[j] * embedding[i][j]
+    call q16_shift              ; inline this for more perf, but it'll cost you two bytes!
+    add ebp, eax                ; accumulate
+    add bx, 4                   ; advance pointer
     loop .dot
 
 ; argmax, just track the highest scoring token
     cmp ebp, [es:R_MAX]
     jle .skip_max
-    mov [es:R_MAX], ebp 		; new best score
-    mov [es:R_BEST], di			; new best token
+    mov [es:R_MAX], ebp         ; new best score
+    mov [es:R_BEST], di         ; new best token
 .skip_max:
     inc di
     cmp di, VOCAB
-    jl .lm_loop 				; next token
+    jl .lm_loop                 ; next token
 
     mov bx, [es:R_BEST]         ; return best in BX
     ret
@@ -752,41 +752,41 @@ forward:
 ; Output is written into R_XB (one HEAD_DIM slice per head).
 attention:
     mov cx, HEADS
-	xor bp, bp             		; bp = h (head index, 0..HEADS-1)
+    xor bp, bp                  ; bp = h (head index, 0..HEADS-1)
 .head_loop:
-	push cx
+    push cx
 
-	; 1.QK dot products
-	; For each past token t, compute a_t = dot(Q_h, K_t) * scale
-	; and store in R_ATT[h][t]
+    ; 1.QK dot products
+    ; For each past token t, compute a_t = dot(Q_h, K_t) * scale
+    ; and store in R_ATT[h][t]
     mov cx, [es:CUR_POS]
-    inc cx                 		; process tokens t = 0..CUR_POS inclusive
-    xor di, di					; DI = t
+    inc cx                      ; process tokens t = 0..CUR_POS inclusive
+    xor di, di                  ; DI = t
 .t_loop:
-	push cx						; save token counter
+    push cx                     ; save token counter
 
     ; load K vector for token T, KV head kvh = h/2
     mov dx, KC_SEG
-    call set_seg_1024			; DS = int8 K cache for this layer
-	call get_kv_offset			; BX = offset of K[t][kvh]
+    call set_seg_1024           ; DS = int8 K cache for this layer
+    call get_kv_offset          ; BX = offset of K[t][kvh]
 
-	; Load Q vector for head h
+    ; Load Q vector for head h
     mov si, bp
-    shl si, 5					; h * 32
-    add si, R_QKV				; SI = &Q[h]
+    shl si, 5                   ; h * 32
+    add si, R_QKV               ; SI = &Q[h]
 
-    push di 					; save t
-    push bp						; save h
+    push di                     ; save t
+    push bp                     ; save h
     mov cx, HEAD_DIM
-    xor ebp, ebp				; acc
+    xor ebp, ebp                ; acc
 
 ; dot(Q_h, K_t), K is int8, Q is FP16.16
 .dot_loop:
-    movsx eax, byte [bx]		; eax = K
+    movsx eax, byte [bx]        ; eax = K
     inc bx
     imul dword [es:si]          ; edx:eax = K[t][i] * Q[h][i]
     add si, 4
-    add ebp, eax				; accumulate (low 32 bits enough for HEAD_DIM=8)
+    add ebp, eax                ; accumulate (low 32 bits enough for HEAD_DIM=8)
     loop .dot_loop
 
 .dot_done:
@@ -796,14 +796,14 @@ attention:
 
     ; Dequantize: multiply by K scale for token t
     mov dx, KS_SEG
-    call set_seg_128			; DS = K scale cache for this layer
+    call set_seg_128            ; DS = K scale cache for this layer
 
     mov si, di
-    shl si, 2					; t * 4
-    mov esi, [si]				; esi = scale_kt
+    shl si, 2                   ; t * 4
+    mov esi, [si]               ; esi = scale_kt
 
     imul esi
-    call q16_shift				; eax = dot * scale_kt
+    call q16_shift              ; eax = dot * scale_kt
 
     ; multiply by 1/sqrt(HEAD_DIM) ~= 23170
     mov esi, 23170
@@ -811,7 +811,7 @@ attention:
     call q16_shift              ; eax = a_t (attention score, FP16.16)
 
     ; store score in R_ATT[h][t]
-	call get_att_ptr			; SI = &R_ATT[h][t]
+    call get_att_ptr            ; SI = &R_ATT[h][t]
     mov [es:si], eax
 
     inc di                      ; t++
@@ -820,24 +820,24 @@ attention:
     jnz .t_loop
 
     ; 2. Softmax over attention scores
-	; Converts raw R_ATT[h][0..pos] to probabilities
+    ; Converts raw R_ATT[h][0..pos] to probabilities
 .softmax:
     mov cx, [es:CUR_POS]
     inc cx
     mov di, bp
-    shl di, 11					; h * 2048 (SEQ * 4)
-    add di, R_ATT				; DI = &R_ATT[h][0]
+    shl di, 11                  ; h * 2048 (SEQ * 4)
+    add di, R_ATT               ; DI = &R_ATT[h][0]
 
     ; Find max score
     push di
     push cx
-    mov eax, [es:di]			; max = first elem
+    mov eax, [es:di]            ; max = first elem
 .max:
-	scasd					    ; DI += 4, compare eax
-	jge .notmax                 ; eax >= [es:di], not new max
-	mov eax, [es:di-4]		    ; new max
+    scasd                       ; DI += 4, compare eax
+    jge .notmax                 ; eax >= [es:di], not new max
+    mov eax, [es:di-4]          ; new max
 .notmax:
-	loop .max
+    loop .max
     pop cx
     pop di
 
@@ -845,22 +845,22 @@ attention:
     ; Compute exp(x - max) for each score and accumulate sum
     push di
     push cx
-    xor esi, esi				; sum = 0
+    xor esi, esi                ; sum = 0
 .s_exp:
-	mov edx, [es:di]
-	push eax                    ; save max
-	sub eax, edx                ; diff = max - x
-	shr eax, 10                 ; scale down for LUT index, diff / 64
-	cmp ax, 511					; clamp to LUT range
-	jle .s_ok
-	mov ax, 511
+    mov edx, [es:di]
+    push eax                    ; save max
+    sub eax, edx                ; diff = max - x
+    shr eax, 10                 ; scale down for LUT index, diff / 64
+    cmp ax, 511                 ; clamp to LUT range
+    jle .s_ok
+    mov ax, 511
 .s_ok:
-	push di
-	mov di, ax
-	shl di, 2					; di = index * 4
-	mov edx, [fs:di]			; edx = exp_lut[diff]
-	pop di                  
-	pop eax                     ; restore max
+    push di
+    mov di, ax
+    shl di, 2                   ; di = index * 4
+    mov edx, [fs:di]            ; edx = exp_lut[diff]
+    pop di                  
+    pop eax                     ; restore max
 
     mov [es:di], edx            ; replace score with exp
     add esi, edx                ; sum += exp
@@ -878,101 +878,101 @@ attention:
     div esi                     ; eax = exp / sum (FP16.16)
     stosd                       ; store probability, DI += 4
     loop .s_div
-	; 3. Weighted sum of V
-	; out[h] = sum over t of (attention[h][t] * V[t])
+    ; 3. Weighted sum of V
+    ; out[h] = sum over t of (attention[h][t] * V[t])
 .agg:
     ; Clear r_xb[h] before accumulating
     mov bx, bp
-    shl bx, 5					; h * 32
+    shl bx, 5                   ; h * 32
     add bx, R_XB
     mov di, bx
     xor eax, eax
     mov cx, HEAD_DIM
-    rep stosd					; zero out R_XB[h]
+    rep stosd                   ; zero out R_XB[h]
 
     mov cx, [es:CUR_POS]
     inc cx
-    xor di, di              ; DI = t
+    xor di, di                  ; DI = t
 .v_loop:
     push cx
 
-	; Load V vector for token t, KV head kvh = h/2
+    ; Load V vector for token t, KV head kvh = h/2
     mov dx, VC_SEG
-    call set_seg_1024			; DS =  V cache for this layer
-	call get_kv_offset			; BX = offset of V[t][kvh]
+    call set_seg_1024           ; DS =  V cache for this layer
+    call get_kv_offset          ; BX = offset of V[t][kvh]
 
     ; a_t = R_ATT[h][t]
-	call get_att_ptr			; SI = &R_ATT[h][t]
-    mov eax, [es:si] 		    ; eax = a_t
+    call get_att_ptr            ; SI = &R_ATT[h][t]
+    mov eax, [es:si]            ; eax = a_t
 
     ; Dequantize V: multiply a_t by V scale for token t
     push ds
     mov dx, VS_SEG
-    call set_seg_128			; DS = V scale cache for this layer
+    call set_seg_128            ; DS = V scale cache for this layer
     mov si, di
-    shl si, 2					; t * 4
-    mov edx, [si]				; edx = scale_vt
+    shl si, 2                   ; t * 4
+    mov edx, [si]               ; edx = scale_vt
     pop ds                      ; restore DS = VC_SEG
 
     imul edx
-    call q16_shift       ; eax = a_scaled = a_t * scale_vt
+    call q16_shift              ; eax = a_scaled = a_t * scale_vt
 
-	; Accumulate: R_XB[h] += a_scale * V[t]
-    mov edx, eax				; edx = a_scaled
+    ; Accumulate: R_XB[h] += a_scale * V[t]
+    mov edx, eax                ; edx = a_scaled
     mov si, bp
-    shl si, 5					; h * 32
-    add si, R_XB				; SI = &R_XB[h]
+    shl si, 5                   ; h * 32
+    add si, R_XB                ; SI = &R_XB[h]
 
     mov cx, HEAD_DIM
 .v_mac:
-    movsx eax, byte [bx]		; eax = V[t][i] (int8)
+    movsx eax, byte [bx]        ; eax = V[t][i] (int8)
     inc bx
-    imul eax, edx				; eax = V[t][i] * a_scaled
+    imul eax, edx               ; eax = V[t][i] * a_scaled
     add [es:si], eax
     add si, 4
     loop .v_mac
 
-    inc di                  ; t++
+    inc di                      ; t++
     pop cx
     loop .v_loop
 
-	; Next head
+    ; Next head
     inc bp
     pop cx
-	dec cx
-	jnz .head_loop
+    dec cx
+    jnz .head_loop
 .done:
     ret
 
 ; SiLU gating: out[i] = silu(gate[i]) * up[i]
 ; where silu(x) = x * sigmoid(x), looked up from a precomputed table
 silu_gate:
-    mov di, R_HB 				; DI = gate vector
-    mov si, R_HB+HIDDEN*4		; SI = up vector
+    mov di, R_HB                ; DI = gate vector
+    mov si, R_HB+HIDDEN*4       ; SI = up vector
     mov cx, HIDDEN
 .lp:
-	; Compute silu_lut index from gate[i]
-	mov eax, [es:di]			; eax = gate[i] (FP16.16)
-	sar eax, 10					; downscale to [-512, 511] 
-	add ah, 2					; ax += 512, shift to [0, 1023]
+    ; Compute silu_lut index from gate[i]
+    mov eax, [es:di]            ; eax = gate[i] (FP16.16)
+    sar eax, 10                 ; downscale to [-512, 511] 
+    add ah, 2                   ; ax += 512, shift to [0, 1023]
 
     ; clamp to [0, 1023]
-    cwd							; dx = 0xFFFF if ax < 0 else 0
-    not dx						; dx = 0 if ax < 0, else 0xFFFF
-    and ax, dx					; ax = max(0, ax)
+    cwd                         ; dx = 0xFFFF if ax < 0 else 0
+    not dx                      ; dx = 0 if ax < 0, else 0xFFFF
+    and ax, dx                  ; ax = max(0, ax)
     cmp ax, 1023
     jle .ok
-    mov ax, 1023				; ax = min(ax, 1023)
+    mov ax, 1023                ; ax = min(ax, 1023)
 .ok:
     mov bx, ax
-    shl bx, 2					; bx = index * 4
-    mov edx, [fs:bx+0x800] 		; edx = silu_lut[ax]
+    shl bx, 2                   ; bx = index * 4
+    mov edx, [fs:bx+0x800]      ; edx = silu_lut[ax]
 
-	; Multiply by up[i] and store in gate[i]
-    es lodsd 					; eax = up[i]
+    ; Multiply by up[i] and store in gate[i]
+    es lodsd                    ; eax = up[i]
     imul edx                    ; eax = up[i] * silu(gate[i])
-    call q16_shift				; shift back to FP16.16
-    stosd						; gate[i] = res, DI += 4
+    call q16_shift              ; shift back to FP16.16
+    stosd                       ; gate[i] = res, DI += 4
     loop .lp
     ret
 
