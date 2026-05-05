@@ -239,7 +239,7 @@ rmsnorm:
 .sum:
     es lodsd                    ; eax = x[i], SI+=4
     imul eax                    ; edx:eax = x[i]^2
-    call q16_shift              ; eax = x[i]^2 in FP16.16
+	Q16_SHIFT_INLINE            ; eax = x[i]^2 in FP16.16
     add ebp, eax                ; ebp += x[i]^2
     loop .sum
 
@@ -259,7 +259,7 @@ rmsnorm:
 .norm:
     es lodsd              ; eax = x[i], SI += 4
     imul ebp              ; eax = x[i] * (1/sqrt(ss))
-    call q16_shift        
+    Q16_SHIFT_INLINE        
     imul dword [bx]       ; eax *= w[i]
     Q16_SHIFT_INLINE      ; eax = x[i] * w[i] / sqrt(ss)
     add bx, 4             ; advance weight pointer
