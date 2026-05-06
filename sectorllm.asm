@@ -651,9 +651,8 @@ forward:
 ; the token embedding table the logit for token i is just the
 ; dot product of the final hidden state with embedding[i].
 .lm_loop:
-    mov ax, W_TOKEN_EMB
-    imul cx, di, 16             ; token i * 16 paragraphs
-    add ax, cx
+    imul ax, di, 16             ; token i * 16 paragraphs
+    add ax, W_TOKEN_EMB
     mov ds, ax                  ; DS = embedding[i] segment
 
     xor ebp, ebp                ; ebp dot accumulator
