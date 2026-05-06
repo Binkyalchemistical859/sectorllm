@@ -99,7 +99,7 @@ org 0x7c00
 %define CUR_LAYER  0x09E6    ; word
 %define CUR_POS    0x09E8    ; word
 
-%define R_ATT     0x0A00    ; FP16.16[TOKEN_COUNT*HEADS]
+%define R_ATT     0x0A00     ; FP16.16[TOKEN_COUNT*HEADS]
     
 
 ; Cache Segments
@@ -199,14 +199,14 @@ inv_sqrt:
 
 ; Newton-Raphson: y = y * (3 - x*y^2) / 2
 .loop:
-	push eax					; save y
+    push eax                    ; save y
     mul eax                     ; edx:eax = y^2
     call q16_shift              ; convert to FP16.16
     mul ebx                     ; edx:eax = x*y^2
     call q16_shift              ; convert to FP16.16
     neg eax                     ; eax = -x*y^2
     add eax, 3*65536            ; eax = 3 - x*y^2 (FP16.16)
-	pop esi						; esi = y
+    pop esi                     ; esi = y
     mul esi
     call q16_shift              ; eax = y*(3 - x*y^2) (FP16.16)
     shr eax, 1                  ; / 2
@@ -237,7 +237,7 @@ rmsnorm:
 .sum:
     es lodsd                    ; eax = x[i], SI+=4
     imul eax                    ; edx:eax = x[i]^2
-	Q16_SHIFT_INLINE            ; eax = x[i]^2 in FP16.16
+    Q16_SHIFT_INLINE            ; eax = x[i]^2 in FP16.16
     add ebp, eax                ; ebp += x[i]^2
     loop .sum
 
@@ -251,7 +251,7 @@ rmsnorm:
     xchg ebp, eax               ; ebp = normalization scale
 
     pop si                      ; restore SI to R_X
-	xor bx, bx
+    xor bx, bx
     mov cl, DIM
 
 ; 2. Normalize and apply weights
@@ -384,7 +384,7 @@ print_token:
 get_kv_ptr:
     mov bx, [es:CUR_LAYER]
     add bx, dx                 ; + base
-	shl ebx, 16				   ; layer * 64 KB
+    shl ebx, 16                ; layer * 64 KB
 
     imul ax, di, 128            ; t * 128 (KV_DIM * sizeof(u32))
 
@@ -403,11 +403,11 @@ cache_kv:
     mov di, [es:CUR_POS]        ; DI = t
     xor bp, bp                  ; BP = 0 (head 0, so get_kv_ptr gets the start of token slice)
     call get_kv_ptr             ; ebx = address of cache slot
-    mov cl, KV_DIM				; safe since CX is zeroed by apply_rope
+    mov cl, KV_DIM              ; safe since CX is zeroed by apply_rope
 .lp:
     es lodsd                    ; eax = src[i], SI += 4
     mov [gs:ebx], eax           ; cache[t][0][i] = eax
-    add bx, 4					; should be safe for this model
+    add bx, 4                   ; should be safe for this model
     loop .lp
     ret
 
@@ -477,18 +477,18 @@ do_matmul:
 
     xor si, si                ; SI=0: matmul reads DS:SI starting from weight row 0
 
-	; Compute cols and rows, cols = (stride*16)/64=stride/4, and rows = DIM
-	; W2 is the exception, stride/4 = HIDDEN, swap
-	mov ax, cx
-	shr ax, 2
-	mov dx, DIM
-	cmp cl, 0xB0				; w2 stride = 0x2B0
-	jne .dims_ok
-	xchg ax, dx					; swap them
+    ; Compute cols and rows, cols = (stride*16)/64=stride/4, and rows = DIM
+    ; W2 is the exception, stride/4 = HIDDEN, swap
+    mov ax, cx
+    shr ax, 2
+    mov dx, DIM
+    cmp cl, 0xB0                ; w2 stride = 0x2B0
+    jne .dims_ok
+    xchg ax, dx                 ; swap them
 
 .dims_ok:
     pop bx                    ; restore out_ptr
-	; fallthrough into matmul
+    ; fallthrough into matmul
 
 ; Multiply an int8 matrix by a FP16.16 vector
 ; in DS:SI:     int8 weight matrix (row-major)
@@ -528,8 +528,8 @@ matmul:
 
     ; Store result
     pop di
-	stosd						; [ES:DI] = eax, DI+=4
-	mov bx, di
+    stosd                       ; [ES:DI] = eax, DI+=4
+    mov bx, di
 
     pop di
     pop dx
@@ -566,14 +566,14 @@ forward:
     ; Project normalized input to Q, K, V simultaneously
     mov si, W_WQKV_S
     mov ax, W_WQKV_Q
-    mov ch, 2					; 0x200
+    mov ch, 2                   ; 0x200
     mov di, R_XB
     mov bx, R_QKV
     call do_matmul              ; R_QKV = [Q | K | V] = w_wqkv * R_XB
 
     ; Apply RoPE to Q and K
     mov di, R_QKV
-    mov cl, HEADS				; CX zeroed by matmul
+    mov cl, HEADS               ; CX zeroed by matmul
     call apply_rope             ; rotate Q
 
     mov di, R_QKV + DIM * 4     ; K starts after Q
@@ -595,7 +595,7 @@ forward:
     ; Project attention output back to DIM
     mov si, W_WO_S
     mov ax, W_WO_Q
-    mov ch, 1					; 0x100
+    mov ch, 1                   ; 0x100
     mov di, R_XB
     mov bx, R_XB2
     call do_matmul              ; R_XB2 = w_wo * R_XB
@@ -641,7 +641,7 @@ forward:
     xor di, di                  ; R_X
     call rmsnorm                ; R_X = rmsnorm(R_X, w_rms_final)
 
-	; Compute logits and pick best token (use greedy argmax)
+    ; Compute logits and pick best token (use greedy argmax)
     mov dword [es:R_MAX], 0x80000000 ; INT_MIN
     xor di, di                       ; DI = token index
     mov word [es:R_BEST], di         ; best = 0
@@ -718,7 +718,7 @@ attention:
     mov cx, HEAD_DIM
     xor ebp, ebp                ; acc
 
-	xchg ebx, esi
+    xchg ebx, esi
 
 ; dot(Q_h, K_t)
 .dot_loop:
@@ -828,12 +828,12 @@ attention:
     mov ebp, eax
 
     mov cx, HEAD_DIM
-	xchg ebx, esi
+    xchg ebx, esi
 .v_mac:
-    a32 gs lodsd				; eax = V[t][i], ESI += 4
-    imul ebp					; edx:eax = V[t][i] * a_t 
+    a32 gs lodsd                ; eax = V[t][i], ESI += 4
+    imul ebp                    ; edx:eax = V[t][i] * a_t 
     call q16_shift
-    add [es:bx], eax			; R_XB[h][i] += V[t][i] * a_t
+    add [es:bx], eax            ; R_XB[h][i] += V[t][i] * a_t
     add bx, 4
     loop .v_mac
 
@@ -855,7 +855,7 @@ attention:
 silu_gate:
     mov di, R_HB                ; DI = gate vector
     mov si, R_HB+HIDDEN*4       ; SI = up vector
-    mov cl, HIDDEN				; zeroed by matmul
+    mov cl, HIDDEN              ; zeroed by matmul
 .lp:
     ; Compute silu_lut index from gate[i]
     mov eax, [es:di]            ; eax = gate[i] (FP16.16)
