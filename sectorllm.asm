@@ -103,8 +103,11 @@ org 0x7c00
     
 
 ; Cache Segments
-%define K_CACHE_BASE 0x00100000 ; 1MB mark
-%define V_CACHE_BASE 0x00200000 ; 2MB mark
+%define K_CACHE_SEG  0x10 ; 1MB>>16
+%define V_CACHE_SEG  0x20 ; 2MB>>16
+
+
+
 
 
 ; Best for hot code
@@ -216,8 +219,7 @@ inv_sqrt:
 ; rmsnorm helper: sets up DS, BX and ES:DI before doing rmsnorm logic on R_XB
 ; in AX:      weight segment base
 do_rmsnorm:
-    mov cx, [es:CUR_LAYER]
-    shl cx, 4
+    imul cx, [es:CUR_LAYER], 16
     add ax, cx
     mov ds, ax
     xor bx, bx
@@ -298,8 +300,8 @@ vadd:
 ; using precomputed interleaved (cos, sin) pairs in the frequency table.
 ; in ES:DI: vector to rotate (FP16.16), modified in place
 ; in CX:     number of heads to process
+; clobbers EBP
 apply_rope:
-    push ebp
     imul bx, [es:CUR_POS], 32   ; bx = CUR_POS * 32 (8 bytes per pair * 4 pairs per head)
     push W_FREQ_CIS
     pop ds                      ; DS = freq table
@@ -350,7 +352,6 @@ apply_rope:
     pop cx
     pop bx
     loop .head_loop
-    pop ebp
     ret
 
 ; Print the token string from the corresponding number.
@@ -384,24 +385,22 @@ print_token:
 
 ; Compute a 32-bit pointer into the KV cache for a given token and KV head.
 ; Cache layout: [layer][token][kv_head] with each element being FP16.16 (4 bytes)
-; in  EDX: cache base address (K_CACHE_BASE or V_CACHE_BASE)
+; in  DX:  shifted cache base address (K_CACHE_SEG or V_CACHE_SEG)
 ; in  DI:  t (token position)
 ; in  BP:  h (attention head index)
 ; out EBX: absolute address of KV vector (accessed via GS)
 get_kv_ptr:
-    movzx ebx, word [es:CUR_LAYER]
-    shl ebx, 16                 ; layer * 64KB
-    add ebx, edx                ; + base
+    mov bx, [es:CUR_LAYER]
+    add bx, dx                 ; + base
+	shl ebx, 16				   ; layer * 64 KB
 
-    mov ax, di
-    shl ax, 7                   ; t * 128 (KV_DIM * sizeof(u32))
+    imul ax, di, 128            ; t * 128 (KV_DIM * sizeof(u32))
 
     mov cx, bp
     shr cx, 1                   ; cx = kvh = h / 2
     shl cx, 5                   ; cx = kvh * 32 (HEAD_DIM * sizeof(u32))
     add ax, cx
-    movzx eax, ax               ; zero extend to 32-bits
-    add ebx, eax                ; final address
+    add bx, ax                  ; final address
     ret
 
 ; Compute a pointer into the attention score buffer.
@@ -427,7 +426,10 @@ dap:
 
 gdt_desc:
     dw 0x0F                     ; limit
-    dd gdt                      ; base
+    dd gdt - 8                  ; base (cursed)
+
+gdt:
+    dq 0x00CF92000000FFFF       ; data
 
 _bootsector_end:
 %assign bootsector_size _bootsector_end - $$
@@ -515,7 +517,7 @@ matmul:
 
 ; Store a FP16.16 KV vector into the flat KV cache at the current position.
 ; in  SI:  source vector (ES:SI, FP16.16[KV_DIM])
-; in  EDX: cache base address (K_CACHE_BASE or V_CACHE_BASE)
+; in  DX:  shifted cache base address (K_CACHE_SEG or V_CACHE_SEG)
 cache_kv:
     pushad
     mov di, [es:CUR_POS]        ; DI = t
@@ -571,11 +573,11 @@ forward:
 
     ; cache K and V for this position
     mov si, R_QKV + DIM*4
-    mov edx, K_CACHE_BASE
+    mov dx, K_CACHE_SEG
     call cache_kv               ; KC[layer][pos] = K (FP16.16)
 
     mov si, R_QKV + DIM*4 + KV_DIM*4
-    mov edx, V_CACHE_BASE
+    mov dx, V_CACHE_SEG
     call cache_kv               ; VC[layer][pos] = V (FP16.16)
 
     ; Compute attention scores, softmax and weight sum of V
@@ -699,7 +701,7 @@ attention:
     push cx                     ; save token counter
 
     ; load K vector for token T, KV head kvh = h/2
-    mov edx, K_CACHE_BASE
+    mov dx, K_CACHE_SEG
     call get_kv_ptr  
 
     ; Load Q vector for head h
@@ -808,7 +810,7 @@ attention:
     push cx
 
     ; Load V vector for token t, KV head kvh = h/2
-    mov edx, V_CACHE_BASE
+    mov dx, V_CACHE_SEG
     call get_kv_ptr 
 
     ; a_t = R_ATT[h][t]
@@ -878,10 +880,6 @@ silu_gate:
     ret
 
 
-; Data for boot sector
-gdt:
-    dq 0                        ; null
-    dq 0x00CF92000000FFFF       ; data
 
 _code_end:
 %assign code_size _code_end - $$
