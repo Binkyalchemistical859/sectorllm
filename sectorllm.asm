@@ -461,6 +461,17 @@ do_matmul:
     mov ds, bx                ; DS = this layer's int8 weight segment
 
     xor si, si                ; SI=0: matmul reads DS:SI starting from weight row 0
+
+	; Compute cols and rows, cols = (stride*16)/64=stride/4, and rows = DIM
+	; W2 is the exception, stride/4 = HIDDEN, swap
+	mov ax, cx
+	shr ax, 2
+	mov dx, DIM
+	cmp cl, 0xB0				; w2 stride = 0x2B0
+	jne .dims_ok
+	xchg ax, dx					; swap them
+
+.dims_ok:
     pop bx                    ; restore out_ptr
 	; fallthrough into matmul
 
@@ -468,13 +479,11 @@ do_matmul:
 ; in DS:SI:     int8 weight matrix (row-major)
 ; in ES:DI:     input vector (FP16.16[COLS])
 ; in ES:BX:     output vector (FP16.16[ROWS])
-; in EDX:       (ROWS << 16) | COLS
+; in DX:        rows
+; in AX:        cols
 ; in EBP:       FP16.16 scale factor for dequantization
 matmul:
     pushad
-
-    mov ax, dx                  ; ax = ROWS
-    shr edx, 16                 ; dx = COLS
 
 ; For each output element
 .row:
@@ -497,7 +506,7 @@ matmul:
     add ebx, eax                ; accumulate low 32 bits (should be safe for DIM=64)
     loop .dot
 
-    mov eax, ebx
+    xchg eax, ebx
     imul ebp                    ; edx:eax = acc * scale
     call q16_shift              ; eax = result in FP16.16
 
@@ -557,7 +566,6 @@ forward:
     mov si, W_WQKV_S
     mov ax, W_WQKV_Q
     mov cx, 0x200
-    mov edx, (DIM << 16) | (DIM + 2*KV_DIM) ; rows=96 (Q+K+V), cols=64
     mov di, R_XB
     mov bx, R_QKV
     call do_matmul              ; R_QKV = [Q | K | V] = w_wqkv * R_XB
@@ -587,7 +595,6 @@ forward:
     mov si, W_WO_S
     mov ax, W_WO_Q
     mov cx, 0x100
-    mov edx, (DIM << 16) | DIM
     mov di, R_XB
     mov bx, R_XB2
     call do_matmul              ; R_XB2 = w_wo * R_XB
@@ -604,7 +611,6 @@ forward:
     mov si, W_W13_S
     mov ax, W_W13_Q
     mov cx, 0x560
-    mov edx, (DIM << 16) | (2*HIDDEN)
     mov di, R_XB
     mov bx, R_HB
     call do_matmul              ; R_HB = [gate | up] = w_w13 * R_XB
