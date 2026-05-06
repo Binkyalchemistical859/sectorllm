@@ -151,7 +151,7 @@ entry:
     pop es
 
     ; Load the model at 0x2000:0
-    mov cx, 12
+    mov cl, 12
     mov si, dap
 
 .load_model:
@@ -186,7 +186,6 @@ start_inference:
 ; out EAX: 1/sqrt(x) (FP16.16)
 ; Clobbers: ecx
 inv_sqrt:
-    push ebx
     xchg eax, ebx                ; save x
 
     ; Initial guess from bit position: y ~= 2^((48-bsr(x))/2)
@@ -213,7 +212,6 @@ inv_sqrt:
     shr eax, 1                  ; / 2
     loop .loop
 .done:
-    pop ebx
     ret
 
 ; rmsnorm helper: sets up DS, BX and ES:DI before doing rmsnorm logic on R_XB
@@ -222,18 +220,16 @@ do_rmsnorm:
     imul cx, [es:CUR_LAYER], 16
     add ax, cx
     mov ds, ax
-    xor bx, bx
     mov di, R_XB
 
 ; Compute RMSNorm: out[i] = x[i] * w[i] / sqrt(mean(x^2) + epsilon)
 ; in  ES:DI: output buffer (FP16.16[DIM])
 ; in  ES:0:  input x (R_X, FP16.16[DIM])
 ; in  DS:0:  weights w (FP16.16[DIM])
+; clobbers EBP
 rmsnorm:
-    push ebp
-
     xor ebp, ebp                ; ebp = sum of squares accumulator
-    mov cx, DIM
+    mov cl, DIM
     xor si, si                  ; SI=0, points to ES:R_X
     push si                     
 
@@ -247,7 +243,7 @@ rmsnorm:
 
 .eps:
     ; ss = (sum / DIM) + epsilon
-    mov eax, ebp
+    xchg eax, ebp
     shr eax, DIM_LOG            ; eax = sum/DIM
     inc eax ; epsilon
 
@@ -255,7 +251,8 @@ rmsnorm:
     xchg ebp, eax               ; ebp = normalization scale
 
     pop si                      ; restore SI to R_X
-    mov cx, DIM
+	xor bx, bx
+    mov cl, DIM
 
 ; 2. Normalize and apply weights
 .norm:
@@ -268,12 +265,6 @@ rmsnorm:
     stosd                 ; write to output, DI += 4
     loop .norm
 .done:
-    pop ebp
-    ret
-
-; It is slower to always call this function but it saves one byte each time!
-q16_shift:
-    shrd eax, edx, 16
     ret
 
 ; Add the matmul output into R_X in-place
@@ -287,7 +278,7 @@ vadd_rx:
 ; in ES:SI: src vector (FP16.16[DIM])
 ; in ES:DI: dest vector (FP16.16[DIM])
 vadd:
-    mov cx, DIM
+    mov cl, DIM
 .lp:
     es lodsd                    ; eax = *SI, SI += 4
     add [es:di], eax            ; *DI += eax
@@ -295,11 +286,12 @@ vadd:
     loop .lp
     ret
 
+
 ; Apply RoPE to a vector in-place.
 ; Rotates each consecutive pair (x0, x1) by the angle for its position,
 ; using precomputed interleaved (cos, sin) pairs in the frequency table.
 ; in ES:DI: vector to rotate (FP16.16), modified in place
-; in CX:     number of heads to process
+; in CL:    number of heads to process
 ; clobbers EBP, returns with CX zeroed
 apply_rope:
     imul bx, [es:CUR_POS], 32   ; bx = CUR_POS * 32 (8 bytes per pair * 4 pairs per head)
@@ -403,6 +395,23 @@ get_kv_ptr:
     add bx, ax                  ; final address
     ret
 
+; Store a FP16.16 KV vector into the flat KV cache at the current position.
+; in  SI:  source vector (ES:SI, FP16.16[KV_DIM])
+; in  DX:  shifted cache base address (K_CACHE_SEG or V_CACHE_SEG)
+; clobbers BP, DI, BX
+cache_kv:
+    mov di, [es:CUR_POS]        ; DI = t
+    xor bp, bp                  ; BP = 0 (head 0, so get_kv_ptr gets the start of token slice)
+    call get_kv_ptr             ; ebx = address of cache slot
+    mov cl, KV_DIM				; safe since CX is zeroed by apply_rope
+.lp:
+    es lodsd                    ; eax = src[i], SI += 4
+    mov [gs:ebx], eax           ; cache[t][0][i] = eax
+    add bx, 4					; should be safe for this model
+    loop .lp
+    ret
+
+
 ; Compute a pointer into the attention score buffer.
 ; R_ATT layout is [head][token], each element being FP16.16
 ; in BP:  h (head index)
@@ -440,6 +449,12 @@ dw 0xAA55
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Sector 1 and 2                                                             ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; It is slower to always call this function but it saves one byte each time!
+q16_shift:
+    shrd eax, edx, 16
+    ret
+
 
 ; matmul helper: 
 ; in AX:   base_Q
@@ -525,21 +540,7 @@ matmul:
     pop bx
     ret
 
-; Store a FP16.16 KV vector into the flat KV cache at the current position.
-; in  SI:  source vector (ES:SI, FP16.16[KV_DIM])
-; in  DX:  shifted cache base address (K_CACHE_SEG or V_CACHE_SEG)
-; clobbers BP, DI, BX
-cache_kv:
-    mov di, [es:CUR_POS]        ; DI = t
-    xor bp, bp                  ; BP = 0 (head 0, so get_kv_ptr gets the start of token slice)
-    call get_kv_ptr             ; ebx = address of cache slot
-    mov cl, KV_DIM				; safe since CX is zeroed by apply_rope
-.lp:
-    es lodsd                    ; eax = src[i], SI += 4
-    mov [gs:ebx], eax           ; cache[t][0][i] = eax
-    add bx, 4					; should be safe for this model
-    loop .lp
-    ret
+
 
 ; Full forward pass of the transformer for one token.
 ; in BX:  input token index
@@ -637,7 +638,6 @@ forward:
     ; Final normalization
     push W_RMS_FINAL
     pop ds
-    xor bx, bx
     xor di, di                  ; R_X
     call rmsnorm                ; R_X = rmsnorm(R_X, w_rms_final)
 
