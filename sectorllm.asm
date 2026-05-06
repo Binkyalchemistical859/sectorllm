@@ -300,7 +300,7 @@ vadd:
 ; using precomputed interleaved (cos, sin) pairs in the frequency table.
 ; in ES:DI: vector to rotate (FP16.16), modified in place
 ; in CX:     number of heads to process
-; clobbers EBP
+; clobbers EBP, returns with CX zeroed
 apply_rope:
     imul bx, [es:CUR_POS], 32   ; bx = CUR_POS * 32 (8 bytes per pair * 4 pairs per head)
     push W_FREQ_CIS
@@ -532,11 +532,11 @@ cache_kv:
     mov di, [es:CUR_POS]        ; DI = t
     xor bp, bp                  ; BP = 0 (head 0, so get_kv_ptr gets the start of token slice)
     call get_kv_ptr             ; ebx = address of cache slot
-    mov cx, KV_DIM
+    mov cl, KV_DIM				; safe since CX is zeroed by apply_rope
 .lp:
     es lodsd                    ; eax = src[i], SI += 4
     mov [gs:ebx], eax           ; cache[t][0][i] = eax
-    add ebx, 4
+    add bx, 4					; should be safe for this model
     loop .lp
     popad
     ret
@@ -552,7 +552,7 @@ forward:
     mov ds, ax
     xor si, si
     xor di, di                  ; DI = R_X
-    mov cx, DIM * 2             ; dword
+    mov cl, DIM * 2             ; CX should be zeroed here, so this is fine
     rep movsw                   ; R_X = embedding[token]
 
     mov [es:CUR_LAYER], cx      ; cx is 0
@@ -565,7 +565,7 @@ forward:
     ; Project normalized input to Q, K, V simultaneously
     mov si, W_WQKV_S
     mov ax, W_WQKV_Q
-    mov cx, 0x200
+    mov ch, 2					; 0x200
     mov di, R_XB
     mov bx, R_QKV
     call do_matmul              ; R_QKV = [Q | K | V] = w_wqkv * R_XB
@@ -576,7 +576,7 @@ forward:
     call apply_rope             ; rotate Q
 
     mov di, R_QKV + DIM * 4     ; K starts after Q
-    mov cx, KV_HEADS
+    mov cl, KV_HEADS
     call apply_rope             ; rotate K
 
     ; cache K and V for this position
@@ -594,7 +594,7 @@ forward:
     ; Project attention output back to DIM
     mov si, W_WO_S
     mov ax, W_WO_Q
-    mov cx, 0x100
+    mov ch, 1					; 0x100
     mov di, R_XB
     mov bx, R_XB2
     call do_matmul              ; R_XB2 = w_wo * R_XB
@@ -746,8 +746,7 @@ attention:
 
     inc di                      ; t++
     pop cx
-    dec cx
-    jnz .t_loop
+    loop .t_loop
 
     ; 2. Softmax over attention scores
     ; Converts raw R_ATT[h][0..pos] to probabilities
