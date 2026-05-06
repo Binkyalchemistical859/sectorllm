@@ -482,8 +482,9 @@ do_matmul:
 ; in DX:        rows
 ; in AX:        cols
 ; in EBP:       FP16.16 scale factor for dequantization
+; returns with CX zeroed
 matmul:
-    pushad
+    push bx
 
 ; For each output element
 .row:
@@ -511,9 +512,9 @@ matmul:
     call q16_shift              ; eax = result in FP16.16
 
     ; Store result
-    pop bx
-    mov [es:bx], eax
-    add bx, 4                   ; advance output pointer
+    pop di
+	stosd						; [ES:DI] = eax, DI+=4
+	mov bx, di
 
     pop di
     pop dx
@@ -521,14 +522,14 @@ matmul:
     dec ax
     jnz .row
 
-    popad
+    pop bx
     ret
 
 ; Store a FP16.16 KV vector into the flat KV cache at the current position.
 ; in  SI:  source vector (ES:SI, FP16.16[KV_DIM])
 ; in  DX:  shifted cache base address (K_CACHE_SEG or V_CACHE_SEG)
+; clobbers BP, DI, BX
 cache_kv:
-    pushad
     mov di, [es:CUR_POS]        ; DI = t
     xor bp, bp                  ; BP = 0 (head 0, so get_kv_ptr gets the start of token slice)
     call get_kv_ptr             ; ebx = address of cache slot
@@ -538,7 +539,6 @@ cache_kv:
     mov [gs:ebx], eax           ; cache[t][0][i] = eax
     add bx, 4					; should be safe for this model
     loop .lp
-    popad
     ret
 
 ; Full forward pass of the transformer for one token.
@@ -572,7 +572,7 @@ forward:
 
     ; Apply RoPE to Q and K
     mov di, R_QKV
-    mov cx, HEADS
+    mov cl, HEADS				; CX zeroed by matmul
     call apply_rope             ; rotate Q
 
     mov di, R_QKV + DIM * 4     ; K starts after Q
@@ -622,7 +622,6 @@ forward:
     mov si, W_W2_S
     mov ax, W_W2_Q
     mov cx, 0x2B0
-    mov edx, (HIDDEN << 16) | DIM
     mov di, R_HB
     mov bx, R_XB
     call do_matmul              ; R_XB = w_w2 * R_HB
@@ -692,7 +691,7 @@ attention:
     xor eax, eax
     rep stosd
 
-    mov cx, HEADS
+    mov cl, HEADS
     xor bp, bp                  ; bp = h (head index, 0..HEADS-1)
 .head_loop:
     push cx
@@ -857,7 +856,7 @@ attention:
 silu_gate:
     mov di, R_HB                ; DI = gate vector
     mov si, R_HB+HIDDEN*4       ; SI = up vector
-    mov cx, HIDDEN
+    mov cl, HIDDEN				; zeroed by matmul
 .lp:
     ; Compute silu_lut index from gate[i]
     mov eax, [es:di]            ; eax = gate[i] (FP16.16)
